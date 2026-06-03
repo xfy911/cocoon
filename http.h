@@ -58,6 +58,7 @@ typedef struct {
     
     /* 压缩相关头 */
     bool accept_gzip;       /* 客户端支持 gzip */
+    bool accept_brotli;     /* 客户端支持 brotli */
     bool accept_deflate;    /* 客户端支持 deflate */
     bool has_accept_encoding;
 

@@ -33,9 +33,10 @@ int send_all(int fd, const char *buf, size_t len);
  * @param req HTTP 请求
  * @param root_dir 静态资源根目录
  * @param gzip_enabled 是否启用 gzip 压缩
+ * @param brotli_enabled 是否启用 brotli 压缩
  * @return COCOON_OK 成功，负值错误码
  */
-int static_serve_file(int fd, const http_request_t *req, const char *root_dir, bool gzip_enabled);
+int static_serve_file(int fd, const http_request_t *req, const char *root_dir, bool gzip_enabled, bool brotli_enabled);
 
 /**
  * static_serve_directory - 生成目录列表 HTML

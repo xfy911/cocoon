@@ -7,7 +7,7 @@ COCO_LIB     ?= $(COCO_DIR)/build
 
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -std=c11 -D_GNU_SOURCE -I$(COCO_INCLUDE)
-LDFLAGS = -L$(COCO_LIB) -lcoco -lpthread -lm -luring -lz
+LDFLAGS = -L$(COCO_LIB) -lcoco -lpthread -lm -luring -lz -lbrotlienc
 
 # 调试模式
 DEBUG ?= 0
@@ -88,7 +88,7 @@ $(UNIT_TEST_DIR)/test_http: $(UNIT_TEST_DIR)/test_http.c http.c log.c $(UNITY_SR
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_http.c http.c log.c $(UNITY_SRC) -lm
 
 $(UNIT_TEST_DIR)/test_static: $(UNIT_TEST_DIR)/test_static.c http.c log.c $(UNITY_SRC)
-	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_static.c http.c log.c $(UNITY_SRC) -lm -lz
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_static.c http.c log.c $(UNITY_SRC) -lm -lz -lbrotlienc
 
 $(UNIT_TEST_DIR)/test_log: $(UNIT_TEST_DIR)/test_log.c log.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_log.c log.c $(UNITY_SRC) -lm

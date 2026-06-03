@@ -52,6 +52,7 @@ static void print_usage(const char *prog) {
     printf("  -l <level>  日志级别: error, warn, info, debug（默认 info）\n");
     printf("  -v          详细日志输出（等同于 -l debug）\n");
     printf("  --no-gzip   禁用 gzip 压缩\n");
+    printf("  --no-brotli 禁用 brotli 压缩\n");
     printf("  -h          显示此帮助\n");
     printf("\nExample:\n");
     printf("  %s -c cocoon.json\n", prog);
@@ -79,6 +80,7 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
     config->timeout_ms = 0;
     config->log_level = LOG_LEVEL_INFO;
     config->gzip_enabled = true;
+    config->brotli_enabled = true;
 
     bool has_root_dir = false;
     bool has_port = false;
@@ -87,6 +89,7 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
     bool has_timeout = false;
     bool has_log_level = false;
     bool has_gzip_enabled = false;
+    bool has_brotli_enabled = false;
     const char *config_file = NULL;
 
     for (int i = 1; i < argc; i++) {
@@ -133,6 +136,9 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
         } else if (strcmp(argv[i], "--no-gzip") == 0) {
             config->gzip_enabled = false;
             has_gzip_enabled = true;
+        } else if (strcmp(argv[i], "--no-brotli") == 0) {
+            config->brotli_enabled = false;
+            has_brotli_enabled = true;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             exit(0);
@@ -150,7 +156,7 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
         }
         /* 用命令行参数覆盖配置文件 */
         config_merge(config, config, has_root_dir, has_port, has_workers,
-                     has_max_conn, has_timeout, has_log_level, has_gzip_enabled);
+                     has_max_conn, has_timeout, has_log_level, has_gzip_enabled, has_brotli_enabled);
     }
 
     if (!config->root_dir) {

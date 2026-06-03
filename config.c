@@ -271,6 +271,9 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
         } else if (strcmp(key_str, "gzip_enabled") == 0) {
             if (val.type == TOKEN_TRUE) config->gzip_enabled = true;
             else if (val.type == TOKEN_FALSE) config->gzip_enabled = false;
+        } else if (strcmp(key_str, "brotli_enabled") == 0) {
+            if (val.type == TOKEN_TRUE) config->brotli_enabled = true;
+            else if (val.type == TOKEN_FALSE) config->brotli_enabled = false;
         }
         /* 其他字段：忽略（未来扩展预留） */
 
@@ -293,7 +296,7 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
 void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
                   bool has_root_dir, bool has_port, bool has_workers,
                   bool has_max_conn, bool has_timeout, bool has_log_level,
-                  bool has_gzip_enabled) {
+                  bool has_gzip_enabled, bool has_brotli_enabled) {
     if (!base || !cmdline) return;
 
     /* 命令行显式指定的值覆盖配置文件 */
@@ -307,6 +310,7 @@ void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
     if (has_timeout) base->timeout_ms = cmdline->timeout_ms;
     if (has_log_level) base->log_level = cmdline->log_level;
     if (has_gzip_enabled) base->gzip_enabled = cmdline->gzip_enabled;
+    if (has_brotli_enabled) base->brotli_enabled = cmdline->brotli_enabled;
     /* threaded 是 flag 参数，命令行指定了就用命令行的 */
     if (cmdline->threaded) base->threaded = true;
 }

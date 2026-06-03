@@ -128,6 +128,7 @@ static void parse_headers(const char **p, const char *end, http_request_t *req) 
                     req->has_accept_encoding = true;
                     const char *val = req->headers[req->num_headers].value;
                     if (strstr(val, "gzip") != NULL) req->accept_gzip = true;
+                    if (strstr(val, "br") != NULL) req->accept_brotli = true;
                     if (strstr(val, "deflate") != NULL) req->accept_deflate = true;
                 } else if (strcmp(req->headers[req->num_headers].name, "content-type") == 0) {
                     int copy_len = strlen(req->headers[req->num_headers].value);

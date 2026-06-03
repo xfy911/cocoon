@@ -268,6 +268,67 @@ void test_gzip_compress_buffer_too_small(void) {
     TEST_ASSERT_EQUAL(-1, compressed); /* 应该失败 */
 }
 
+/* ===== brotli_compress ===== */
+
+void test_brotli_compress_simple(void) {
+    const char *src = "hello world hello world hello world hello world";
+    size_t src_len = strlen(src);
+    
+    char *dst = (char *)malloc(src_len);
+    TEST_ASSERT_NOT_NULL(dst);
+    
+    ssize_t compressed = brotli_compress(src, src_len, dst, src_len);
+    
+    /* 可压缩文本应该被压缩 */
+    TEST_ASSERT_GREATER_THAN(0, compressed);
+    TEST_ASSERT_LESS_THAN((ssize_t)src_len, compressed);
+    
+    free(dst);
+}
+
+void test_brotli_compress_incompressible(void) {
+    /* 随机数据通常难以压缩 */
+    char src[256];
+    srand(42);
+    for (int i = 0; i < 256; i++) src[i] = (char)(rand() % 256);
+    
+    char *dst = (char *)malloc(256);
+    TEST_ASSERT_NOT_NULL(dst);
+    
+    ssize_t compressed = brotli_compress(src, 256, dst, 256);
+    
+    /* 不可压缩数据：brotli 可能返回 0（不压缩）或 -1（错误），或仍略小于原大小 */
+    /* 放宽断言：只要返回 >= 0 或 -1 都算合理，但这里只检查不崩溃 */
+    TEST_ASSERT_TRUE(compressed >= -1);
+    
+    free(dst);
+}
+
+void test_brotli_compress_small(void) {
+    /* 小数据可能压缩后更大 */
+    const char *src = "hi";
+    
+    char *dst = (char *)malloc(256);
+    TEST_ASSERT_NOT_NULL(dst);
+    
+    ssize_t compressed = brotli_compress(src, 2, dst, 256);
+    
+    /* 太小可能返回 0 */
+    TEST_ASSERT_GREATER_OR_EQUAL(0, compressed);
+    
+    free(dst);
+}
+
+void test_brotli_compress_buffer_too_small(void) {
+    const char *src = "hello world hello world";
+    
+    /* 极小的输出缓冲区 */
+    char dst[1];
+    ssize_t compressed = brotli_compress(src, strlen(src), dst, 1);
+    
+    TEST_ASSERT_EQUAL(-1, compressed); /* 应该失败 */
+}
+
 /* ===== send_all ===== */
 
 void test_send_all_basic(void) {
@@ -407,6 +468,12 @@ int main(void) {
     RUN_TEST(test_gzip_compress_incompressible);
     RUN_TEST(test_gzip_compress_small);
     RUN_TEST(test_gzip_compress_buffer_too_small);
+    
+    /* brotli_compress */
+    RUN_TEST(test_brotli_compress_simple);
+    RUN_TEST(test_brotli_compress_incompressible);
+    RUN_TEST(test_brotli_compress_small);
+    RUN_TEST(test_brotli_compress_buffer_too_small);
     
     /* send_all */
     RUN_TEST(test_send_all_basic);

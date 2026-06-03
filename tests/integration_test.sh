@@ -155,6 +155,48 @@ assert_body_contains() {
     fi
 }
 
+assert_brotli() {
+    local url="$1"
+    local desc="${2:-$url}"
+    local encoding
+    encoding=$(curl -s -D - -o /dev/null -H "Accept-Encoding: br" "$url" | grep -i "Content-Encoding:" | tr -d '\r' || true)
+    if echo "$encoding" | grep -qi "br"; then
+        echo "  ✓ $desc — 返回 brotli 压缩"
+        pass
+    else
+        echo "  ✗ $desc — 期望 brotli 压缩, 实际: $encoding"
+        fail
+    fi
+}
+
+assert_brotli_preferred() {
+    local url="$1"
+    local desc="${2:-$url}"
+    local encoding
+    encoding=$(curl -s -D - -o /dev/null -H "Accept-Encoding: gzip, br" "$url" | grep -i "Content-Encoding:" | tr -d '\r' || true)
+    if echo "$encoding" | grep -qi "br"; then
+        echo "  ✓ $desc — 优先返回 brotli 压缩"
+        pass
+    else
+        echo "  ✗ $desc — 期望优先 brotli, 实际: $encoding"
+        fail
+    fi
+}
+
+assert_not_brotli() {
+    local url="$1"
+    local desc="${2:-$url}"
+    local encoding
+    encoding=$(curl -s -D - -o /dev/null -H "Accept-Encoding: br" "$url" | grep -i "Content-Encoding:" | tr -d '\r' || true)
+    if [[ -z "$encoding" ]]; then
+        echo "  ✓ $desc — 无 Content-Encoding（未压缩）"
+        pass
+    else
+        echo "  ✗ $desc — 期望不压缩, 实际: $encoding"
+        fail
+    fi
+}
+
 assert_gzip() {
     local url="$1"
     local desc="${2:-$url}"
@@ -342,6 +384,15 @@ assert_gzip "$BASE/app.js" "JS gzip"
 assert_gzip "$BASE/api.json" "JSON gzip"
 # 图片不应压缩
 assert_not_gzip "$BASE/image.png" "图片不压缩"
+
+echo ""
+echo "=== Brotli 压缩测试 ==="
+assert_brotli "$BASE/index.html" "HTML brotli"
+assert_brotli "$BASE/style.css" "CSS brotli"
+assert_brotli "$BASE/app.js" "JS brotli"
+assert_brotli_preferred "$BASE/index.html" "优先 brotli"
+# 图片不应压缩
+assert_not_brotli "$BASE/image.png" "图片不压缩"
 
 echo ""
 echo "=== MIME 类型测试 ==="

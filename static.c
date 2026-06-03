@@ -21,6 +21,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <zlib.h>
+#include <brotli/encode.h>
 
 /**
  * is_compressible_mime - 判断 MIME 类型是否适合压缩
@@ -81,6 +82,38 @@ static ssize_t gzip_compress(const char *src, size_t src_len,
         return 0;
     }
     return (ssize_t)compressed_len;
+}
+
+/**
+ * brotli_compress - 使用 Brotli 压缩数据
+ *
+ * 使用 Brotli 编码器进行高质量压缩。
+ *
+ * @param src 原始数据
+ * @param src_len 原始数据长度
+ * @param dst 输出缓冲区（调用者分配，建议大小为 src_len）
+ * @param dst_cap 输出缓冲区容量
+ * @return 压缩后长度，0 表示不需要压缩（压缩后更大），-1 表示错误
+ */
+static ssize_t brotli_compress(const char *src, size_t src_len,
+                                 char *dst, size_t dst_cap) {
+    size_t encoded_size = dst_cap;
+    BROTLI_BOOL ok = BrotliEncoderCompress(
+        BROTLI_DEFAULT_QUALITY,      /* 默认质量 11 */
+        BROTLI_DEFAULT_WINDOW,       /* 默认窗口大小 22 */
+        BROTLI_MODE_GENERIC,         /* 通用模式 */
+        src_len,
+        (const uint8_t *)src,
+        &encoded_size,
+        (uint8_t *)dst
+    );
+    if (!ok) return -1;
+
+    /* 如果压缩后更大或差不多，就不压缩了 */
+    if (encoded_size >= src_len * 0.95) {
+        return 0;
+    }
+    return (ssize_t)encoded_size;
 }
 
 /**
@@ -275,7 +308,7 @@ int static_send_error(int fd, int status_code, bool keep_alive) {
  * @param root_dir 静态资源根目录
  * @return COCOON_OK 成功，负值错误码
  */
-int static_serve_file(int fd, const http_request_t *req, const char *root_dir, bool gzip_enabled) {
+int static_serve_file(int fd, const http_request_t *req, const char *root_dir, bool gzip_enabled, bool brotli_enabled) {
     char real_path[4096];
     if (!safe_path_join(real_path, sizeof(real_path), root_dir, req->path)) {
         return static_send_error(fd, 403, req->keep_alive);
@@ -339,13 +372,14 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir, b
         }
     }
 
-    /* 判断是否 gzip 压缩 */
+    /* 判断压缩方式：优先 brotli，回退 gzip */
     int64_t file_size = st.st_size;
     bool use_gzip = false;
-    char *gzip_buf = NULL;
-    ssize_t gzip_len = 0;
+    bool use_brotli = false;
+    char *compress_buf = NULL;
+    ssize_t compress_len = 0;
 
-    if (gzip_enabled && req->accept_gzip && !req->has_range && req->method != HTTP_HEAD) {
+    if (!req->has_range && req->method != HTTP_HEAD) {
         const char *mime = http_mime_type(real_path);
         if (is_compressible_mime(mime) && file_size > 256) {
             /* 读取文件内容到内存 */
@@ -358,11 +392,17 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir, b
                     read_total += n;
                 }
                 if (read_total == file_size) {
-                    gzip_buf = (char *)malloc((size_t)file_size);
-                    if (gzip_buf) {
-                        gzip_len = gzip_compress(file_buf, (size_t)file_size, gzip_buf, (size_t)file_size);
-                        if (gzip_len > 0) {
-                            use_gzip = true;
+                    compress_buf = (char *)malloc((size_t)file_size);
+                    if (compress_buf) {
+                        /* 优先 brotli */
+                        if (brotli_enabled && req->accept_brotli) {
+                            compress_len = brotli_compress(file_buf, (size_t)file_size, compress_buf, (size_t)file_size);
+                            if (compress_len > 0) use_brotli = true;
+                        }
+                        /* 回退 gzip */
+                        if (!use_brotli && gzip_enabled && req->accept_gzip) {
+                            compress_len = gzip_compress(file_buf, (size_t)file_size, compress_buf, (size_t)file_size);
+                            if (compress_len > 0) use_gzip = true;
                         }
                     }
                 }
@@ -376,20 +416,20 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir, b
     int64_t send_end = file_size - 1;
     int status_code = 200;
 
-    if (!use_gzip && req->has_range) {
+    if (!use_gzip && !use_brotli && req->has_range) {
         send_start = req->range_start;
         if (req->range_end >= 0 && req->range_end < file_size) {
             send_end = req->range_end;
         }
         if (send_start >= file_size || send_start > send_end) {
             close(file_fd);
-            free(gzip_buf);
+            free(compress_buf);
             return static_send_error(fd, 416, req->keep_alive);
         }
         status_code = 206;
     }
 
-    int64_t send_length = use_gzip ? gzip_len : (send_end - send_start + 1);
+    int64_t send_length = (use_gzip || use_brotli) ? compress_len : (send_end - send_start + 1);
 
     /* 构建响应头 */
     http_response_t resp = {
@@ -398,27 +438,27 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir, b
         .content_type = http_mime_type(real_path),
         .content_length = send_length,
         .keep_alive = req->keep_alive,
-        .has_range = !use_gzip && req->has_range,
+        .has_range = !use_gzip && !use_brotli && req->has_range,
         .range_start = send_start,
         .range_end = send_end,
         .total_length = file_size,
         .etag = etag,
         .last_modified = last_modified,
-        .content_encoding = use_gzip ? "gzip" : NULL
+        .content_encoding = use_brotli ? "br" : (use_gzip ? "gzip" : NULL)
     };
 
     char header_buf[1024];
     int header_len = http_format_response_header(header_buf, sizeof(header_buf), &resp);
     if (header_len < 0) {
         close(file_fd);
-        free(gzip_buf);
+        free(compress_buf);
         return static_send_error(fd, 500, req->keep_alive);
     }
 
     /* 发送响应头 */
     if (send_all(fd, header_buf, (size_t)header_len) != 0) {
         close(file_fd);
-        free(gzip_buf);
+        free(compress_buf);
         return COCOON_ERROR;
     }
 
@@ -426,14 +466,14 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir, b
     if (req->method == HTTP_HEAD) {
         /* HEAD 请求不发送 body */
         close(file_fd);
-        free(gzip_buf);
+        free(compress_buf);
         return COCOON_OK;
     }
 
-    if (use_gzip) {
-        /* 发送 gzip 压缩后的数据 */
-        send_all(fd, gzip_buf, (size_t)gzip_len);
-        free(gzip_buf);
+    if (use_gzip || use_brotli) {
+        /* 发送压缩后的数据 */
+        send_all(fd, compress_buf, (size_t)compress_len);
+        free(compress_buf);
         close(file_fd);
     } else {
         /* 定位到起始位置 */

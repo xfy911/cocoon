@@ -14,7 +14,7 @@
 |------|------|
 | 🚀 协程驱动 | 基于 coco 有栈协程，每个连接一个协程，上下文切换 < 100ns |
 | 📁 静态托管 | 目录浏览、MIME 自动识别（25+ 种）、Range 请求、index.html 自动补全 |
-| 🗜️ 动态压缩 | 对文本/JSON/CSS/JS 启用 Gzip 压缩，图片等二进制文件跳过 |
+| 🗜️ 动态压缩 | 对文本/JSON/CSS/JS 启用 Brotli / Gzip 压缩，图片等二进制文件跳过，Brotli 优先 |
 | 📦 缓存协商 | ETag + Last-Modified + If-None-Match + If-Modified-Since，自动 304 |
 | 🧵 多核扩展 | M:N 调度器 + Work-stealing，自动负载均衡至多核 |
 | ⚡ 零拷贝 | 优先使用 `sendfile`，减少用户态/内核态数据拷贝 |
@@ -84,7 +84,10 @@ curl -H "Range: bytes=0-99" http://localhost:8080/index.html
 # 缓存协商（304 Not Modified）
 curl -I -H "If-None-Match: \"your-etag\"" http://localhost:8080/index.html
 
-# Gzip 压缩
+# Brotli 压缩（优先）
+curl -I -H "Accept-Encoding: br" http://localhost:8080/index.html
+
+# Gzip 压缩（回退）
 curl -I -H "Accept-Encoding: gzip" http://localhost:8080/index.html
 
 # POST JSON 回显
@@ -118,6 +121,8 @@ Options:
   -o <ms>     连接空闲超时毫秒数（默认 30000）
   -l <level>  日志级别：debug, info, warn, error（默认 info）
   -v          详细日志输出（等同于 -l debug）
+  --no-gzip   禁用 gzip 压缩
+  --no-brotli 禁用 brotli 压缩
   -h          显示帮助
 ```
 
@@ -218,7 +223,7 @@ make bench
 ## 路线图
 
 - [x] ETag / Last-Modified 缓存协商 + 304 Not Modified
-- [x] Gzip 动态压缩
+- [x] Brotli / Gzip 动态压缩（Brotli 优先）
 - [x] 连接空闲超时 + 最大并发限制
 - [x] 分级日志系统
 - [x] POST 请求体解析（JSON / form-urlencoded 回显）

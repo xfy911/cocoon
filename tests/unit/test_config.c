@@ -111,7 +111,8 @@ void test_merge_override_all(void) {
         .max_connections = 100,
         .timeout_ms = 30000,
         .log_level = LOG_LEVEL_INFO,
-        .gzip_enabled = true
+        .gzip_enabled = true,
+        .brotli_enabled = true
     };
     cocoon_config_t cmdline = {
         .root_dir = strdup("/new"),
@@ -121,10 +122,11 @@ void test_merge_override_all(void) {
         .max_connections = 200,
         .timeout_ms = 60000,
         .log_level = LOG_LEVEL_DEBUG,
-        .gzip_enabled = false
+        .gzip_enabled = false,
+        .brotli_enabled = false
     };
     config_merge(&base, &cmdline,
-                 true, true, true, true, true, true, true);
+                 true, true, true, true, true, true, true, true);
     TEST_ASSERT_EQUAL_STRING("/new", base.root_dir);
     TEST_ASSERT_EQUAL(9090, base.port);
     TEST_ASSERT_TRUE(base.threaded);
@@ -133,6 +135,7 @@ void test_merge_override_all(void) {
     TEST_ASSERT_EQUAL(60000, base.timeout_ms);
     TEST_ASSERT_EQUAL(LOG_LEVEL_DEBUG, base.log_level);
     TEST_ASSERT_FALSE(base.gzip_enabled);
+    TEST_ASSERT_FALSE(base.brotli_enabled);
     free((void *)base.root_dir);
     free((void *)cmdline.root_dir);
 }
@@ -152,7 +155,7 @@ void test_merge_no_override(void) {
         .log_level = LOG_LEVEL_DEBUG
     };
     config_merge(&base, &cmdline,
-                 false, false, false, false, false, false, false);
+                 false, false, false, false, false, false, false, false);
     TEST_ASSERT_EQUAL_STRING("/old", base.root_dir);
     TEST_ASSERT_EQUAL(8080, base.port);
     TEST_ASSERT_FALSE(base.threaded);
@@ -175,7 +178,7 @@ void test_merge_partial_override(void) {
         .log_level = LOG_LEVEL_DEBUG
     };
     config_merge(&base, &cmdline,
-                 true, false, false, true, false, false, false);
+                 true, false, false, true, false, false, false, false);
     TEST_ASSERT_EQUAL_STRING("/new", base.root_dir);   /* overridden */
     TEST_ASSERT_EQUAL(8080, base.port);                /* not overridden */
     TEST_ASSERT_EQUAL(2, base.num_workers);            /* not overridden */
@@ -240,7 +243,7 @@ void test_merge_cmdline_null_root_dir(void) {
     /* cmdline root_dir 为 NULL，不应覆盖 base */
     cocoon_config_t base = {.root_dir = strdup("/old"), .port = 8080};
     cocoon_config_t cmdline = {.root_dir = NULL, .port = 9090};
-    config_merge(&base, &cmdline, true, true, false, false, false, false, false);
+    config_merge(&base, &cmdline, true, true, false, false, false, false, false, false);
     TEST_ASSERT_EQUAL_STRING("/old", base.root_dir); /* NULL 不覆盖 */
     TEST_ASSERT_EQUAL(9090, base.port);               /* port 覆盖 */
     free((void *)base.root_dir);
@@ -248,7 +251,7 @@ void test_merge_cmdline_null_root_dir(void) {
 
 void test_merge_null_safety(void) {
     /* 不应 crash */
-    config_merge(NULL, NULL, true, true, true, true, true, true, true);
+    config_merge(NULL, NULL, true, true, true, true, true, true, true, true);
     TEST_ASSERT_TRUE(1);
 }
 
@@ -278,6 +281,32 @@ void test_load_gzip_enabled(void) {
     cleanup(p3);
 }
 
+void test_load_brotli_enabled(void) {
+    /* brotli_enabled: true */
+    const char *p1 = write_temp_config("{\"brotli_enabled\": true}");
+    cocoon_config_t cfg1 = {0};
+    TEST_ASSERT_TRUE(config_load_from_file(p1, &cfg1));
+    TEST_ASSERT_TRUE(cfg1.brotli_enabled);
+    free((void *)cfg1.root_dir);
+    cleanup(p1);
+
+    /* brotli_enabled: false */
+    const char *p2 = write_temp_config("{\"brotli_enabled\": false}");
+    cocoon_config_t cfg2 = {0};
+    TEST_ASSERT_TRUE(config_load_from_file(p2, &cfg2));
+    TEST_ASSERT_FALSE(cfg2.brotli_enabled);
+    free((void *)cfg2.root_dir);
+    cleanup(p2);
+
+    /* 默认值应为 true */
+    const char *p3 = write_temp_config("{\"port\": 3000}");
+    cocoon_config_t cfg3 = {.brotli_enabled = true};
+    TEST_ASSERT_TRUE(config_load_from_file(p3, &cfg3));
+    TEST_ASSERT_TRUE(cfg3.brotli_enabled);
+    free((void *)cfg3.root_dir);
+    cleanup(p3);
+}
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -303,5 +332,6 @@ int main(void) {
     RUN_TEST(test_merge_cmdline_null_root_dir);
 
     RUN_TEST(test_load_gzip_enabled);
+    RUN_TEST(test_load_brotli_enabled);
     return UNITY_END();
 }

@@ -179,11 +179,8 @@ void test_parse_keep_alive_override(void) {
     http_request_t parsed = {0};
     http_parse_request(req, strlen(req), &parsed);
     
-    /* 解析器先设置 HTTP/1.1 默认 keep-alive=true，然后解析头部时，如果 Connection: close 则设为 false */
-    /* 但当前实现是 Connection: keep-alive 才设为 true，否则保持 false */
-    /* 实际上 HTTP/1.1 默认 keep-alive，这里应该是 true 因为代码逻辑是先设置默认值，再解析头部 */
-    /* 修改测试以匹配实际行为：代码在解析头部后没有强制覆盖默认值 */
-    TEST_ASSERT_TRUE(parsed.keep_alive); /* HTTP/1.1 默认保持 */
+    /* HTTP/1.1 默认 keep-alive=true，但 Connection: close 应覆盖为 false */
+    TEST_ASSERT_FALSE(parsed.keep_alive);
     http_request_free(&parsed);
 }
 

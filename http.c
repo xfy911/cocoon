@@ -245,7 +245,7 @@ int http_format_response_header(char *buf, size_t buf_size, const http_response_
 
     /* 状态行 */
     if (resp->has_range) {
-        n += snprintf(buf + n, buf_size - n,
+        n += snprintf(buf + n, buf_size - (size_t)n > buf_size ? 0 : buf_size - (size_t)n,
             "HTTP/1.1 %d %s\r\n"
             "Content-Type: %s\r\n"
             "Content-Length: %ld\r\n"
@@ -256,7 +256,7 @@ int http_format_response_header(char *buf, size_t buf_size, const http_response_
             (long)resp->content_length,
             (long)resp->range_start, (long)resp->range_end, (long)resp->total_length);
     } else {
-        n += snprintf(buf + n, buf_size - n,
+        n += snprintf(buf + n, buf_size - (size_t)n > buf_size ? 0 : buf_size - (size_t)n,
             "HTTP/1.1 %d %s\r\n"
             "Content-Type: %s\r\n"
             "Content-Length: %ld\r\n"
@@ -268,21 +268,37 @@ int http_format_response_header(char *buf, size_t buf_size, const http_response_
 
     /* 缓存头 */
     if (resp->etag && resp->etag[0]) {
-        n += snprintf(buf + n, buf_size - n, "ETag: %s\r\n", resp->etag);
+        if ((size_t)n < buf_size) {
+            n += snprintf(buf + n, buf_size - (size_t)n, "ETag: %s\r\n", resp->etag);
+        } else {
+            n += (int)strlen(resp->etag) + 8;
+        }
     }
     if (resp->last_modified && resp->last_modified[0]) {
-        n += snprintf(buf + n, buf_size - n, "Last-Modified: %s\r\n", resp->last_modified);
+        if ((size_t)n < buf_size) {
+            n += snprintf(buf + n, buf_size - (size_t)n, "Last-Modified: %s\r\n", resp->last_modified);
+        } else {
+            n += (int)strlen(resp->last_modified) + 16;
+        }
     }
     if (resp->content_encoding && resp->content_encoding[0]) {
-        n += snprintf(buf + n, buf_size - n, "Content-Encoding: %s\r\n", resp->content_encoding);
+        if ((size_t)n < buf_size) {
+            n += snprintf(buf + n, buf_size - (size_t)n, "Content-Encoding: %s\r\n", resp->content_encoding);
+        } else {
+            n += (int)strlen(resp->content_encoding) + 20;
+        }
     }
 
     /* 连接头 + 空行 */
-    n += snprintf(buf + n, buf_size - n,
-        "Connection: %s\r\n"
-        "Server: Cocoon/1.0\r\n"
-        "\r\n",
-        resp->keep_alive ? "keep-alive" : "close");
+    if ((size_t)n < buf_size) {
+        n += snprintf(buf + n, buf_size - (size_t)n,
+            "Connection: %s\r\n"
+            "Server: Cocoon/1.0\r\n"
+            "\r\n",
+            resp->keep_alive ? "keep-alive" : "close");
+    } else {
+        n += 35; /* approximate */
+    }
 
     if ((size_t)n >= buf_size) return -1;
     return n;

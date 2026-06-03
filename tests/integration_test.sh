@@ -1,0 +1,292 @@
+#!/usr/bin/env bash
+#
+# integration_test.sh — Cocoon 集成测试套件
+#
+# 依赖: curl, pgrep, sleep
+# 用法: ./tests/integration_test.sh [server_binary] [doc_root]
+#
+
+set -euo pipefail
+
+SERVER="${1:-./cocoon}"
+ROOT="${2:-./tests/fixtures}"
+HOST="localhost:9999"
+BASE="http://${HOST}"
+PASS=0
+FAIL=0
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"; kill_server' EXIT
+
+kill_server() {
+    pkill -f "$SERVER.*$HOST" 2>/dev/null || true
+}
+
+# 启动服务器
+start_server() {
+    echo "[test] 启动服务器: $SERVER -r $ROOT -p 9999"
+    $SERVER -r "$ROOT" -p 9999 -l debug > "$TMPDIR/server.log" 2>&1 &
+    local pid=$!
+    for i in {1..30}; do
+        if curl -s -o /dev/null "$BASE/" 2>/dev/null; then
+            echo "[test] 服务器就绪 (PID $pid)"
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "[test] 服务器启动失败"
+    cat "$TMPDIR/server.log"
+    exit 1
+}
+
+# 断言辅助函数
+pass() {
+    PASS=$((PASS + 1))
+}
+
+fail() {
+    FAIL=$((FAIL + 1))
+}
+
+assert_status() {
+    local url="$1"
+    local expect="$2"
+    local desc="${3:-$url}"
+    local status
+    status=$(curl -s -o /dev/null -w "%{http_code}" "$url")
+    if [[ "$status" == "$expect" ]]; then
+        echo "  ✓ $desc — HTTP $status"
+        pass
+    else
+        echo "  ✗ $desc — 期望 HTTP $expect, 实际 HTTP $status"
+        fail
+    fi
+}
+
+assert_status_with_header() {
+    local header="$1"
+    local url="$2"
+    local expect="$3"
+    local desc="${4:-$url}"
+    local status
+    status=$(curl -s -o /dev/null -w "%{http_code}" -H "$header" "$url")
+    if [[ "$status" == "$expect" ]]; then
+        echo "  ✓ $desc — HTTP $status"
+        pass
+    else
+        echo "  ✗ $desc — 期望 HTTP $expect, 实际 HTTP $status"
+        fail
+    fi
+}
+
+assert_head_status() {
+    local url="$1"
+    local expect="$2"
+    local desc="${3:-$url}"
+    local status
+    status=$(curl -s -o /dev/null -w "%{http_code}" -I "$url")
+    if [[ "$status" == "$expect" ]]; then
+        echo "  ✓ $desc — HTTP $status"
+        pass
+    else
+        echo "  ✗ $desc — 期望 HTTP $expect, 实际 HTTP $status"
+        fail
+    fi
+}
+
+assert_head_no_body() {
+    local url="$1"
+    local desc="${2:-$url}"
+    local len
+    len=$(curl -s -o /dev/null -w "%{size_download}" -I "$url")
+    if [[ "$len" == "0" ]]; then
+        echo "  ✓ $desc — 无响应体"
+        pass
+    else
+        echo "  ✗ $desc — 期望无响应体, 实际 $len 字节"
+        fail
+    fi
+}
+
+assert_header_contains() {
+    local url="$1"
+    local header="$2"
+    local expect="$3"
+    local desc="${4:-$url}"
+    local value
+    value=$(curl -sI "$url" | grep -i "^$header:" | tr -d '\r' || true)
+    if echo "$value" | grep -qi "$expect"; then
+        echo "  ✓ $desc — $header 包含 '$expect'"
+        pass
+    else
+        echo "  ✗ $desc — $header 期望包含 '$expect', 实际: $value"
+        fail
+    fi
+}
+
+assert_header_contains_with_header() {
+    local req_header="$1"
+    local url="$2"
+    local header="$3"
+    local expect="$4"
+    local desc="${5:-$url}"
+    local value
+    value=$(curl -sI -H "$req_header" "$url" | grep -i "^$header:" | tr -d '\r' || true)
+    if echo "$value" | grep -qi "$expect"; then
+        echo "  ✓ $desc — $header 包含 '$expect'"
+        pass
+    else
+        echo "  ✗ $desc — $header 期望包含 '$expect', 实际: $value"
+        fail
+    fi
+}
+
+assert_body_contains() {
+    local url="$1"
+    local expect="$2"
+    local desc="${3:-$url}"
+    local body
+    body=$(curl -s "$url")
+    if echo "$body" | grep -q "$expect"; then
+        echo "  ✓ $desc — 响应体包含 '$expect'"
+        pass
+    else
+        echo "  ✗ $desc — 响应体期望包含 '$expect'"
+        fail
+    fi
+}
+
+assert_gzip() {
+    local url="$1"
+    local desc="${2:-$url}"
+    local encoding
+    encoding=$(curl -s -D - -o /dev/null -H "Accept-Encoding: gzip" "$url" | grep -i "Content-Encoding:" | tr -d '\r' || true)
+    if echo "$encoding" | grep -qi "gzip"; then
+        echo "  ✓ $desc — 返回 gzip 压缩"
+        pass
+    else
+        echo "  ✗ $desc — 期望 gzip 压缩, 实际: $encoding"
+        fail
+    fi
+}
+
+assert_not_gzip() {
+    local url="$1"
+    local desc="${2:-$url}"
+    local encoding
+    encoding=$(curl -s -D - -o /dev/null -H "Accept-Encoding: gzip" "$url" | grep -i "Content-Encoding:" | tr -d '\r' || true)
+    if [[ -z "$encoding" ]]; then
+        echo "  ✓ $desc — 无 Content-Encoding（未压缩）"
+        pass
+    else
+        echo "  ✗ $desc — 期望不压缩, 实际: $encoding"
+        fail
+    fi
+}
+
+assert_304() {
+    local url="$1"
+    local etag="$2"
+    local desc="${3:-$url}"
+    local status
+    status=$(curl -s -o /dev/null -w "%{http_code}" -H "If-None-Match: $etag" "$url")
+    if [[ "$status" == "304" ]]; then
+        echo "  ✓ $desc — 缓存命中 HTTP 304"
+        pass
+    else
+        echo "  ✗ $desc — 期望 304, 实际 $status"
+        fail
+    fi
+}
+
+assert_304_modified_since() {
+    local url="$1"
+    local mtime="$2"
+    local desc="${3:-$url}"
+    local status
+    status=$(curl -s -o /dev/null -w "%{http_code}" -H "If-Modified-Since: $mtime" "$url")
+    if [[ "$status" == "304" ]]; then
+        echo "  ✓ $desc — If-Modified-Since 命中 HTTP 304"
+        pass
+    else
+        echo "  ✗ $desc — 期望 304, 实际 $status"
+        fail
+    fi
+}
+
+# ===== 测试开始 =====
+start_server
+
+echo ""
+echo "=== 基础功能测试 ==="
+assert_status "$BASE/" "200" "首页 GET"
+assert_status "$BASE/index.html" "200" "index.html GET"
+assert_status "$BASE/nonexist.html" "404" "404 页面"
+assert_status "$BASE/../etc/passwd" "404" "路径遍历防护"
+
+echo ""
+echo "=== HEAD 请求测试 ==="
+assert_head_status "$BASE/" "200" "首页 HEAD"
+assert_head_no_body "$BASE/index.html" "HEAD 无响应体"
+
+echo ""
+echo "=== 响应头测试 ==="
+assert_header_contains "$BASE/index.html" "Server" "Cocoon" "Server 标识"
+assert_header_contains "$BASE/index.html" "Content-Type" "text/html" "Content-Type"
+assert_header_contains "$BASE/" "Content-Type" "text/html" "目录浏览 Content-Type"
+
+echo ""
+echo "=== 目录浏览测试 ==="
+assert_status "$BASE/subdir/" "200" "目录浏览"
+assert_body_contains "$BASE/subdir/" "Index of" "目录列表标题"
+
+echo ""
+echo "=== Range 请求测试 ==="
+assert_status_with_header "Range: bytes=0-9" "$BASE/index.html" "206" "Range 206"
+assert_header_contains_with_header "Range: bytes=0-9" "$BASE/index.html" "Content-Range" "bytes 0-9" "Content-Range 头"
+assert_status_with_header "Range: bytes=99999-100000" "$BASE/index.html" "416" "越界 Range 416"
+
+echo ""
+echo "=== 缓存协商测试 ==="
+# 先获取 ETag
+ETAG=$(curl -sI "$BASE/index.html" | grep -i "ETag:" | awk '{print $2}' | tr -d '\r')
+echo "  首页 ETag: $ETAG"
+assert_header_contains "$BASE/index.html" "ETag" "\"" "ETag 存在"
+assert_header_contains "$BASE/index.html" "Last-Modified" "" "Last-Modified 存在"
+if [[ -n "$ETAG" ]]; then
+    assert_304 "$BASE/index.html" "$ETAG" "If-None-Match 304"
+fi
+# If-Modified-Since 测试
+LM=$(curl -sI "$BASE/index.html" | grep -i "Last-Modified:" | sed 's/Last-Modified: //i' | tr -d '\r')
+if [[ -n "$LM" ]]; then
+    assert_304_modified_since "$BASE/index.html" "$LM" "If-Modified-Since 304"
+fi
+
+echo ""
+echo "=== Gzip 压缩测试 ==="
+assert_gzip "$BASE/index.html" "HTML gzip"
+assert_gzip "$BASE/style.css" "CSS gzip"
+assert_gzip "$BASE/app.js" "JS gzip"
+assert_gzip "$BASE/api.json" "JSON gzip"
+# 图片不应压缩
+assert_not_gzip "$BASE/image.png" "图片不压缩"
+
+echo ""
+echo "=== MIME 类型测试 ==="
+assert_header_contains "$BASE/style.css" "Content-Type" "text/css" "CSS MIME"
+assert_header_contains "$BASE/app.js" "Content-Type" "application/javascript" "JS MIME"
+assert_header_contains "$BASE/api.json" "Content-Type" "application/json" "JSON MIME"
+assert_header_contains "$BASE/image.png" "Content-Type" "image/" "PNG MIME"
+
+echo ""
+echo "=== 结果汇总 ==="
+echo "通过: $PASS"
+echo "失败: $FAIL"
+echo ""
+
+if [[ "$FAIL" -gt 0 ]]; then
+    echo "[test] 查看服务器日志:"
+    cat "$TMPDIR/server.log" | tail -20
+    exit 1
+fi
+
+echo "[test] 全部通过 ✓"

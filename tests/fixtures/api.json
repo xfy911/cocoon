@@ -1,0 +1,11 @@
+{
+    "status": "ok",
+    "message": "Cocoon is running",
+    "version": "1.0",
+    "features": ["coroutines", "static-files", "range-requests", "gzip", "cache-headers"],
+    "config": { "port": 8080, "threads": 4, "timeout": 30000 },
+    "endpoints": { "/api/status": "GET", "/api/health": "GET", "/api/metrics": "GET" },
+    "uptime": 86400,
+    "requests_total": 1234567,
+    "requests_per_second": 15000
+}

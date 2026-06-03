@@ -1,0 +1,8 @@
+body { font-family: sans-serif; background: #f0f0f0; margin: 0; padding: 0; }
+h1 { color: #333; font-size: 2rem; }
+.container { max-width: 800px; margin: 0 auto; padding: 20px; }
+.hero { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 60px 20px; text-align: center; }
+.features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 30px; padding: 40px 20px; }
+.card { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+.footer { text-align: center; padding: 40px; color: #666; font-size: 0.9rem; }
+@media (max-width: 768px) { .features { grid-template-columns: 1fr; } .hero { padding: 40px 20px; } }

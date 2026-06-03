@@ -43,6 +43,16 @@ deps:
 # 完整构建（先构建依赖，再构建项目）
 build-all: deps $(TARGET)
 
+# 集成测试
+test: $(TARGET)
+	@echo "[Cocoon] 运行集成测试..."
+	@./tests/integration_test.sh
+
+# 性能基准
+bench: $(TARGET)
+	@echo "[Cocoon] 运行性能基准..."
+	@./tests/benchmark.sh
+
 # 编译规则
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

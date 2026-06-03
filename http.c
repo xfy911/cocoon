@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 /**
  * http.c - HTTP 解析与响应构建
  *

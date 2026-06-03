@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 /**
  * static.c - 静态资源服务实现
  *
@@ -16,6 +18,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/sendfile.h>
+#include <time.h>
 #include <dirent.h>
 #include <errno.h>
 

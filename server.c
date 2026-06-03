@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 /**
  * server.c - 服务器核心实现
  *
@@ -25,6 +27,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/stat.h>
 
 #include "../coco/include/coco.h"
 
@@ -44,6 +47,7 @@ typedef struct {
     size_t      buf_len;        /**< 缓冲区已用长度 */
     bool        keep_alive;     /**< 当前连接是否保持 */
     bool        closed;         /**< 连接是否已关闭 */
+    const char *root_dir;       /**< 静态资源根目录（引用，不拥有） */
 } connection_t;
 
 /**
@@ -110,34 +114,6 @@ static ssize_t conn_read(connection_t *conn) {
         conn->buf_len += (size_t)n;
     }
     return n;
-}
-
-/**
- * conn_write - 向连接写入数据（协程安全）
- *
- * 使用 coco 的 I/O API 进行非阻塞写入，协程自动 yield 等待可写。
- *
- * @param fd socket
- * @param data 数据缓冲区
- * @param len 数据长度
- * @return 0 成功，-1 失败
- */
-static int conn_write(int fd, const char *data, size_t len) {
-    if (fd < 0) return -1;
-
-    size_t sent = 0;
-    while (sent < len) {
-        ssize_t n;
-        if (coco_sched_get_current() != NULL) {
-            n = coco_write(fd, data + sent, len - sent);
-        } else {
-            n = write(fd, data + sent, len - sent);
-        }
-        if (n < 0) return -1;
-        if (n == 0) return -1;
-        sent += (size_t)n;
-    }
-    return 0;
 }
 
 /**
@@ -259,7 +235,7 @@ static void client_handler(void *arg) {
         }
 
         /* 尝试处理请求 */
-        bool keep = handle_request(conn, conn->sched ? "" : "");
+        bool keep = handle_request(conn, conn->root_dir);
         if (!keep) {
             break;
         }
@@ -284,7 +260,7 @@ static void accept_loop(void *arg) {
     printf("[Cocoon] 服务器启动于端口 %d\n", ctx->config.port);
     if (ctx->config.threaded) {
         printf("[Cocoon] 多线程模式: %d 个工作线程\n",
-               ctx->config.num_workers > 0 ? ctx->config.num_workers : (int)sysconf(_SC_NPROCESSORS_ONLN));
+               ctx->config.num_workers > 0 ? ctx->config.num_workers : (uint32_t)sysconf(_SC_NPROCESSORS_ONLN));
     }
     printf("[Cocoon] 静态资源根目录: %s\n", ctx->config.root_dir);
 
@@ -315,6 +291,7 @@ static void accept_loop(void *arg) {
         conn->fd = client_fd;
         conn->keep_alive = true;
         conn->closed = false;
+        conn->root_dir = ctx->config.root_dir;
 
         if (ctx->config.threaded && coco_sched_get_current()) {
             /* 多线程协程模式：创建协程处理连接 */

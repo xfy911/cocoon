@@ -1,8 +1,12 @@
 # Cocoon - 基于 coco 协程库的静态资源 Web 服务器
 
+# coco 库路径（可覆盖）
+COCO_INCLUDE ?= ../coco/include
+COCO_LIB     ?= ../coco/build
+
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -std=c11 -I../coco/include
-LDFLAGS = -L../coco/build -lcoco -lpthread -lm
+CFLAGS = -Wall -Wextra -O2 -std=c11 -I$(COCO_INCLUDE)
+LDFLAGS = -L$(COCO_LIB) -lcoco -lpthread -lm -luring
 
 # 调试模式
 DEBUG ?= 0

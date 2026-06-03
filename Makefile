@@ -1,8 +1,9 @@
 # Cocoon - 基于 coco 协程库的静态资源 Web 服务器
 
-# coco 库路径（可覆盖）
-COCO_INCLUDE ?= ../coco/include
-COCO_LIB     ?= ../coco/build
+# coco 库路径（默认使用 submodule，可覆盖）
+COCO_DIR     ?= coco
+COCO_INCLUDE ?= $(COCO_DIR)/include
+COCO_LIB     ?= $(COCO_DIR)/build
 
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -std=c11 -I$(COCO_INCLUDE)
@@ -30,6 +31,18 @@ all: $(TARGET)
 $(TARGET): $(OBJS)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)
 
+# 构建 coco 依赖（如果 submodule 已初始化）
+deps:
+	@if [ ! -d "$(COCO_DIR)/build" ]; then \
+		echo "[Cocoon] 构建 coco 依赖..."; \
+		cd $(COCO_DIR) && mkdir -p build && cd build && cmake .. && $(MAKE); \
+	else \
+		echo "[Cocoon] coco 已构建，跳过"; \
+	fi
+
+# 完整构建（先构建依赖，再构建项目）
+build-all: deps $(TARGET)
+
 # 编译规则
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -50,4 +63,4 @@ clean:
 # 重新构建
 rebuild: clean all
 
-.PHONY: all clean install uninstall rebuild
+.PHONY: all clean install uninstall rebuild deps build-all

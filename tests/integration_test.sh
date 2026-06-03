@@ -213,6 +213,38 @@ assert_304_modified_since() {
     fi
 }
 
+assert_post_multipart() {
+    local url="$1"
+    local desc="${2:-$url}"
+    local resp
+    local boundary="----CocoonTestBoundary"
+    local body
+    body="--${boundary}\r\n"
+    body+="Content-Disposition: form-data; name=\"file\"; filename=\"upload_test.txt\"\r\n"
+    body+="Content-Type: text/plain\r\n"
+    body+="\r\n"
+    body+="Cocoon multipart upload test content\r\n"
+    body+="--${boundary}--\r\n"
+    
+    resp=$(curl -s -X POST -H "Content-Type: multipart/form-data; boundary=${boundary}" -d "$body" "$url")
+    if echo "$resp" | grep -q '"uploaded"'; then
+        echo "  ✓ $desc — 响应包含上传结果"
+        pass
+    else
+        echo "  ✗ $desc — 响应期望包含上传结果, 实际: $resp"
+        fail
+    fi
+    
+    # 验证文件是否被保存
+    if [ -f "$ROOT/uploads/upload_test.txt" ]; then
+        echo "  ✓ $desc — 文件已保存到 uploads/"
+        pass
+    else
+        echo "  ✗ $desc — 文件未保存到 uploads/"
+        fail
+    fi
+}
+
 assert_post_json() {
     local url="$1"
     local body="$2"
@@ -328,6 +360,10 @@ echo "=== POST 请求测试 ==="
 assert_post_json "$BASE/api/echo" '{"test": "hello"}' '"test"' "POST JSON 回显"
 assert_post_form "$BASE/api/echo" 'name=cocoon&version=1.0' 'cocoon' "POST 表单回显"
 assert_status_405 "$BASE/index.html" "PUT 405"
+
+echo ""
+echo "=== 文件上传测试 ==="
+assert_post_multipart "$BASE/upload" "multipart 文件上传"
 
 echo ""
 echo "=== 结果汇总 ==="

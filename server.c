@@ -56,6 +56,7 @@ typedef struct {
     uint32_t        timeout_ms;     /**< 连接空闲超时毫秒（从配置复制） */
     coco_timer_t   *timer;          /**< 空闲超时定时器 */
     coco_coro_t    *coro;           /**< 当前处理协程 */
+    bool        gzip_enabled;    /**< 是否启用 gzip 压缩 */
 } connection_t;
 struct server_context {
     int                 listen_fd;    /**< 监听 socket */
@@ -427,14 +428,14 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
                 http_request_free(&req);
                 return req.keep_alive;
             }
-            static_serve_file(conn->fd, &index_req, root_dir);
+            static_serve_file(conn->fd, &index_req, root_dir, conn->gzip_enabled);
         } else {
             /* 无 index.html，生成目录列表 */
             static_serve_directory(conn->fd, &req, root_dir, real_path);
         }
     } else if (S_ISREG(st.st_mode)) {
         /* 普通文件 */
-        static_serve_file(conn->fd, &req, root_dir);
+        static_serve_file(conn->fd, &req, root_dir, conn->gzip_enabled);
     } else {
         static_send_error(conn->fd, 403, req.keep_alive);
     }
@@ -620,6 +621,7 @@ static void accept_loop(void *arg) {
         conn->closed = false;
         conn->root_dir = ctx->config.root_dir;
         conn->timeout_ms = ctx->config.timeout_ms > 0 ? ctx->config.timeout_ms : CONN_TIMEOUT_MS;
+        conn->gzip_enabled = ctx->config.gzip_enabled;
 
         atomic_fetch_add(&g_active_connections, 1);
         log_debug("新连接 fd=%d，当前活跃连接: %d", client_fd,

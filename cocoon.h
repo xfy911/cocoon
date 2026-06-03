@@ -36,6 +36,7 @@ typedef struct cocoon_config {
     uint32_t    max_connections; /**< 最大并发连接数（0 = 无限制） */
     uint32_t    timeout_ms;      /**< 连接空闲超时毫秒（0 = 默认30000） */
     log_level_t log_level;       /**< 日志级别 */
+    bool        gzip_enabled;    /**< 是否启用 gzip 压缩（默认 true） */
 } cocoon_config_t;
 
 /* === 服务器生命周期 API === */

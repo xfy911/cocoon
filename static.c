@@ -275,7 +275,7 @@ int static_send_error(int fd, int status_code, bool keep_alive) {
  * @param root_dir 静态资源根目录
  * @return COCOON_OK 成功，负值错误码
  */
-int static_serve_file(int fd, const http_request_t *req, const char *root_dir) {
+int static_serve_file(int fd, const http_request_t *req, const char *root_dir, bool gzip_enabled) {
     char real_path[4096];
     if (!safe_path_join(real_path, sizeof(real_path), root_dir, req->path)) {
         return static_send_error(fd, 403, req->keep_alive);
@@ -345,7 +345,7 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir) {
     char *gzip_buf = NULL;
     ssize_t gzip_len = 0;
 
-    if (req->accept_gzip && !req->has_range && req->method != HTTP_HEAD) {
+    if (gzip_enabled && req->accept_gzip && !req->has_range && req->method != HTTP_HEAD) {
         const char *mime = http_mime_type(real_path);
         if (is_compressible_mime(mime) && file_size > 256) {
             /* 读取文件内容到内存 */

@@ -34,7 +34,8 @@ void test_load_valid_config(void) {
         "  \"num_workers\": 8,\n"
         "  \"max_connections\": 5000,\n"
         "  \"timeout_ms\": 60000,\n"
-        "  \"log_level\": \"debug\"\n"
+        "  \"log_level\": \"debug\",\n"
+        "  \"gzip_enabled\": false\n"
         "}\n"
     );
     cocoon_config_t cfg = {0};
@@ -46,6 +47,7 @@ void test_load_valid_config(void) {
     TEST_ASSERT_EQUAL(5000, cfg.max_connections);
     TEST_ASSERT_EQUAL(60000, cfg.timeout_ms);
     TEST_ASSERT_EQUAL(LOG_LEVEL_DEBUG, cfg.log_level);
+    TEST_ASSERT_FALSE(cfg.gzip_enabled);
     free((void *)cfg.root_dir);
     cleanup(p);
 }
@@ -108,19 +110,21 @@ void test_merge_override_all(void) {
         .num_workers = 2,
         .max_connections = 100,
         .timeout_ms = 30000,
-        .log_level = LOG_LEVEL_INFO
+        .log_level = LOG_LEVEL_INFO,
+        .gzip_enabled = true
     };
     cocoon_config_t cmdline = {
-        .root_dir = "/new",
+        .root_dir = strdup("/new"),
         .port = 9090,
         .threaded = true,
         .num_workers = 4,
         .max_connections = 200,
         .timeout_ms = 60000,
-        .log_level = LOG_LEVEL_DEBUG
+        .log_level = LOG_LEVEL_DEBUG,
+        .gzip_enabled = false
     };
     config_merge(&base, &cmdline,
-                 true, true, true, true, true, true);
+                 true, true, true, true, true, true, true);
     TEST_ASSERT_EQUAL_STRING("/new", base.root_dir);
     TEST_ASSERT_EQUAL(9090, base.port);
     TEST_ASSERT_TRUE(base.threaded);
@@ -128,7 +132,9 @@ void test_merge_override_all(void) {
     TEST_ASSERT_EQUAL(200, base.max_connections);
     TEST_ASSERT_EQUAL(60000, base.timeout_ms);
     TEST_ASSERT_EQUAL(LOG_LEVEL_DEBUG, base.log_level);
+    TEST_ASSERT_FALSE(base.gzip_enabled);
     free((void *)base.root_dir);
+    free((void *)cmdline.root_dir);
 }
 
 void test_merge_no_override(void) {
@@ -146,7 +152,7 @@ void test_merge_no_override(void) {
         .log_level = LOG_LEVEL_DEBUG
     };
     config_merge(&base, &cmdline,
-                 false, false, false, false, false, false);
+                 false, false, false, false, false, false, false);
     TEST_ASSERT_EQUAL_STRING("/old", base.root_dir);
     TEST_ASSERT_EQUAL(8080, base.port);
     TEST_ASSERT_FALSE(base.threaded);
@@ -169,7 +175,7 @@ void test_merge_partial_override(void) {
         .log_level = LOG_LEVEL_DEBUG
     };
     config_merge(&base, &cmdline,
-                 true, false, false, true, false, false);
+                 true, false, false, true, false, false, false);
     TEST_ASSERT_EQUAL_STRING("/new", base.root_dir);   /* overridden */
     TEST_ASSERT_EQUAL(8080, base.port);                /* not overridden */
     TEST_ASSERT_EQUAL(2, base.num_workers);            /* not overridden */
@@ -234,7 +240,7 @@ void test_merge_cmdline_null_root_dir(void) {
     /* cmdline root_dir 为 NULL，不应覆盖 base */
     cocoon_config_t base = {.root_dir = strdup("/old"), .port = 8080};
     cocoon_config_t cmdline = {.root_dir = NULL, .port = 9090};
-    config_merge(&base, &cmdline, true, true, false, false, false, false);
+    config_merge(&base, &cmdline, true, true, false, false, false, false, false);
     TEST_ASSERT_EQUAL_STRING("/old", base.root_dir); /* NULL 不覆盖 */
     TEST_ASSERT_EQUAL(9090, base.port);               /* port 覆盖 */
     free((void *)base.root_dir);
@@ -242,8 +248,34 @@ void test_merge_cmdline_null_root_dir(void) {
 
 void test_merge_null_safety(void) {
     /* 不应 crash */
-    config_merge(NULL, NULL, true, true, true, true, true, true);
+    config_merge(NULL, NULL, true, true, true, true, true, true, true);
     TEST_ASSERT_TRUE(1);
+}
+
+void test_load_gzip_enabled(void) {
+    /* gzip_enabled: true */
+    const char *p1 = write_temp_config("{\"gzip_enabled\": true}");
+    cocoon_config_t cfg1 = {0};
+    TEST_ASSERT_TRUE(config_load_from_file(p1, &cfg1));
+    TEST_ASSERT_TRUE(cfg1.gzip_enabled);
+    free((void *)cfg1.root_dir);
+    cleanup(p1);
+
+    /* gzip_enabled: false */
+    const char *p2 = write_temp_config("{\"gzip_enabled\": false}");
+    cocoon_config_t cfg2 = {0};
+    TEST_ASSERT_TRUE(config_load_from_file(p2, &cfg2));
+    TEST_ASSERT_FALSE(cfg2.gzip_enabled);
+    free((void *)cfg2.root_dir);
+    cleanup(p2);
+
+    /* 默认值应为 true（在 main 中设置，但这里 0 初始化后为 false） */
+    const char *p3 = write_temp_config("{\"port\": 3000}");
+    cocoon_config_t cfg3 = {.gzip_enabled = true};
+    TEST_ASSERT_TRUE(config_load_from_file(p3, &cfg3));
+    TEST_ASSERT_TRUE(cfg3.gzip_enabled); /* 未指定时保持原值 */
+    free((void *)cfg3.root_dir);
+    cleanup(p3);
 }
 
 void setUp(void) {}
@@ -270,5 +302,6 @@ int main(void) {
     RUN_TEST(test_merge_null_safety);
     RUN_TEST(test_merge_cmdline_null_root_dir);
 
+    RUN_TEST(test_load_gzip_enabled);
     return UNITY_END();
 }

@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cocoon Server</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+        }
+        .container {
+            text-align: center;
+            padding: 40px;
+        }
+        h1 {
+            font-size: 4rem;
+            margin-bottom: 20px;
+            font-weight: 300;
+            letter-spacing: -2px;
+        }
+        .tagline {
+            font-size: 1.3rem;
+            opacity: 0.9;
+            margin-bottom: 40px;
+        }
+        .features {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 30px;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .feature {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            padding: 30px;
+            border-radius: 16px;
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        .feature h3 {
+            font-size: 1.1rem;
+            margin-bottom: 10px;
+        }
+        .feature p {
+            font-size: 0.9rem;
+            opacity: 0.8;
+            line-height: 1.5;
+        }
+        .emoji {
+            font-size: 2.5rem;
+            margin-bottom: 15px;
+            display: block;
+        }
+        footer {
+            margin-top: 60px;
+            font-size: 0.85rem;
+            opacity: 0.6;
+        }
+        @media (max-width: 768px) {
+            .features { grid-template-columns: 1fr; }
+            h1 { font-size: 2.5rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Cocoon 🐛</h1>
+        <p class="tagline">基于 coco 协程库的轻量级静态资源服务器</p>
+        
+        <div class="features">
+            <div class="feature">
+                <span class="emoji">⚡</span>
+                <h3>协程驱动</h3>
+                <p>每个连接一个协程，上下文切换 &lt; 100ns，轻松支撑数万并发</p>
+            </div>
+            <div class="feature">
+                <span class="emoji">📁</span>
+                <h3>静态托管</h3>
+                <p>支持目录浏览、MIME 自动识别、Range 请求，开箱即用</p>
+            </div>
+            <div class="feature">
+                <span class="emoji">🧵</span>
+                <h3>多线程调度</h3>
+                <p>M:N 调度器自动扩展至多核，Work-stealing 保证负载均衡</p>
+            </div>
+        </div>
+        
+        <footer>
+            <p>Built with <a href="https://github.com/DefectingCat/coco" style="color:#fff;">coco</a> • MIT License</p>
+        </footer>
+    </div>
+</body>
+</html>

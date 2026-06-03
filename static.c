@@ -23,6 +23,75 @@
 #include <errno.h>
 
 /**
+ * format_http_time - 将时间戳格式化为 HTTP 日期字符串
+ *
+ * HTTP 日期格式: "Wed, 21 Oct 2015 07:28:00 GMT"
+ *
+ * @param t 时间戳（秒）
+ * @param buf 输出缓冲区
+ * @param buf_size 缓冲区大小
+ */
+static void format_http_time(time_t t, char *buf, size_t buf_size) {
+    struct tm *gmt = gmtime(&t);
+    if (gmt) {
+        strftime(buf, buf_size, "%a, %d %b %Y %H:%M:%S GMT", gmt);
+    } else {
+        buf[0] = '\0';
+    }
+}
+
+/**
+ * generate_etag - 基于文件元数据生成 ETag
+ *
+ * 格式: "大小-修改时间十六进制"
+ * 示例: "1024-647a3b2f"
+ *
+ * @param st 文件状态结构体
+ * @param buf 输出缓冲区
+ * @param buf_size 缓冲区大小
+ */
+static void generate_etag(const struct stat *st, char *buf, size_t buf_size) {
+    snprintf(buf, buf_size, "\"%lx-%lx\"", (unsigned long)st->st_size, (unsigned long)st->st_mtime);
+}
+
+/**
+ * match_etag - 比较 ETag 值是否匹配
+ *
+ * 支持 W/ 弱匹配前缀和 * 通配符。
+ *
+ * @param etag 服务器 ETag
+ * @param if_none_match 客户端 If-None-Match 值
+ * @return true 匹配
+ */
+static bool match_etag(const char *etag, const char *if_none_match) {
+    if (!etag || !if_none_match) return false;
+    /* 通配符匹配 */
+    if (strcmp(if_none_match, "*") == 0) return true;
+    /* 去除 W/ 前缀比较 */
+    const char *client = if_none_match;
+    if (strncmp(client, "W/", 2) == 0) client += 2;
+    return strcmp(client, etag) == 0;
+}
+
+/**
+ * parse_http_time - 解析 HTTP 日期字符串为时间戳
+ *
+ * 支持 RFC 1123 / RFC 850 / ANSI C 格式。
+ *
+ * @param str HTTP 日期字符串
+ * @return 时间戳，解析失败返回 -1
+ */
+static time_t parse_http_time(const char *str) {
+    struct tm tm = {0};
+    if (strptime(str, "%a, %d %b %Y %H:%M:%S GMT", &tm) != NULL ||
+        strptime(str, "%A, %d-%b-%y %H:%M:%S GMT", &tm) != NULL ||
+        strptime(str, "%a %b %d %H:%M:%S %Y", &tm) != NULL) {
+        return timegm(&tm);
+    }
+    return -1;
+}
+
+/**
  * safe_path_join - 安全路径拼接
  *
  * 防止路径遍历攻击，禁止超出根目录的访问。
@@ -166,6 +235,49 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir) {
         return static_send_error(fd, 403, req->keep_alive);
     }
 
+    /* 生成 ETag 和 Last-Modified */
+    char etag[64];
+    char last_modified[64];
+    generate_etag(&st, etag, sizeof(etag));
+    format_http_time(st.st_mtime, last_modified, sizeof(last_modified));
+
+    /* 检查缓存协商 */
+    if (req->has_if_none_match && match_etag(etag, req->if_none_match)) {
+        close(file_fd);
+        http_response_t resp = {
+            .status_code = 304,
+            .status_text = "Not Modified",
+            .content_type = http_mime_type(real_path),
+            .content_length = 0,
+            .keep_alive = req->keep_alive,
+            .etag = etag,
+            .last_modified = last_modified
+        };
+        char header_buf[1024];
+        int header_len = http_format_response_header(header_buf, sizeof(header_buf), &resp);
+        if (header_len > 0) send_all(fd, header_buf, (size_t)header_len);
+        return COCOON_OK;
+    }
+    if (req->has_if_modified_since) {
+        time_t client_time = parse_http_time(req->if_modified_since);
+        if (client_time >= 0 && st.st_mtime <= client_time) {
+            close(file_fd);
+            http_response_t resp = {
+                .status_code = 304,
+                .status_text = "Not Modified",
+                .content_type = http_mime_type(real_path),
+                .content_length = 0,
+                .keep_alive = req->keep_alive,
+                .etag = etag,
+                .last_modified = last_modified
+            };
+            char header_buf[1024];
+            int header_len = http_format_response_header(header_buf, sizeof(header_buf), &resp);
+            if (header_len > 0) send_all(fd, header_buf, (size_t)header_len);
+            return COCOON_OK;
+        }
+    }
+
     /* 计算发送范围 */
     int64_t file_size = st.st_size;
     int64_t send_start = 0;
@@ -196,7 +308,9 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir) {
         .has_range = req->has_range,
         .range_start = send_start,
         .range_end = send_end,
-        .total_length = file_size
+        .total_length = file_size,
+        .etag = etag,
+        .last_modified = last_modified
     };
 
     char header_buf[1024];

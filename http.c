@@ -227,29 +227,36 @@ int http_format_response_header(char *buf, size_t buf_size, const http_response_
             "Content-Type: %s\r\n"
             "Content-Length: %ld\r\n"
             "Accept-Ranges: bytes\r\n"
-            "Content-Range: bytes %ld-%ld/%ld\r\n"
-            "Connection: %s\r\n"
-            "Server: Cocoon/1.0\r\n"
-            "\r\n",
+            "Content-Range: bytes %ld-%ld/%ld\r\n",
             resp->status_code, resp->status_text,
             resp->content_type ? resp->content_type : "application/octet-stream",
             (long)resp->content_length,
-            (long)resp->range_start, (long)resp->range_end, (long)resp->total_length,
-            resp->keep_alive ? "keep-alive" : "close");
+            (long)resp->range_start, (long)resp->range_end, (long)resp->total_length);
     } else {
         n += snprintf(buf + n, buf_size - n,
             "HTTP/1.1 %d %s\r\n"
             "Content-Type: %s\r\n"
             "Content-Length: %ld\r\n"
-            "Accept-Ranges: bytes\r\n"
-            "Connection: %s\r\n"
-            "Server: Cocoon/1.0\r\n"
-            "\r\n",
+            "Accept-Ranges: bytes\r\n",
             resp->status_code, resp->status_text,
             resp->content_type ? resp->content_type : "application/octet-stream",
-            (long)resp->content_length,
-            resp->keep_alive ? "keep-alive" : "close");
+            (long)resp->content_length);
     }
+
+    /* 缓存头 */
+    if (resp->etag && resp->etag[0]) {
+        n += snprintf(buf + n, buf_size - n, "ETag: %s\r\n", resp->etag);
+    }
+    if (resp->last_modified && resp->last_modified[0]) {
+        n += snprintf(buf + n, buf_size - n, "Last-Modified: %s\r\n", resp->last_modified);
+    }
+
+    /* 连接头 + 空行 */
+    n += snprintf(buf + n, buf_size - n,
+        "Connection: %s\r\n"
+        "Server: Cocoon/1.0\r\n"
+        "\r\n",
+        resp->keep_alive ? "keep-alive" : "close");
 
     if ((size_t)n >= buf_size) return -1;
     return n;

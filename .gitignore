@@ -1,12 +1,11 @@
-# Cocoon
-/build/
+# 忽略构建产物
 *.o
-*.a
-*.so
 cocoon
-.DS_Store
-*.swp
-*.swo
-*~
-.vscode/
-.idea/
+
+# 忽略测试二进制文件和上传目录
+tests/unit/test_config
+tests/unit/test_http
+tests/unit/test_log
+tests/unit/test_multipart
+tests/unit/test_static
+tests/fixtures/uploads/

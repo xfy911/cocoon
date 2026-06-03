@@ -177,6 +177,69 @@ void test_merge_partial_override(void) {
     free((void *)base.root_dir);
 }
 
+void test_load_invalid_field_type(void) {
+    /* port 为字符串而非数字，应解析失败或忽略 */
+    const char *p = write_temp_config("{\"port\": \"not_a_number\"}");
+    cocoon_config_t cfg = {0};
+    /* 极简解析器可能忽略非法类型，不 crash 即可 */
+    config_load_from_file(p, &cfg);
+    /* port 保持默认值 0 */
+    TEST_ASSERT_EQUAL(0, cfg.port);
+    free((void *)cfg.root_dir);
+    cleanup(p);
+}
+
+void test_load_log_level_invalid(void) {
+    const char *p = write_temp_config("{\"log_level\": \"verbose\"}");
+    cocoon_config_t cfg = {0};
+    config_load_from_file(p, &cfg);
+    /* 非法 log_level 保持默认值 INFO */
+    TEST_ASSERT_EQUAL(LOG_LEVEL_INFO, cfg.log_level);
+    free((void *)cfg.root_dir);
+    cleanup(p);
+}
+
+void test_load_nested_ignored(void) {
+    /* 极简解析器遇到嵌套对象会失败，但至少不 crash */
+    const char *p = write_temp_config(
+        "{\n"
+        "  \"port\": 7777,\n"
+        "  \"nested\": {\"a\": 1}\n"
+        "}\n"
+    );
+    cocoon_config_t cfg = {0};
+    /* 当前极简解析器不支持嵌套对象，返回 false，但不应 segfault */
+    config_load_from_file(p, &cfg);
+    TEST_ASSERT_TRUE(1); /* 走到这里说明没 crash */
+    free((void *)cfg.root_dir);
+    cleanup(p);
+}
+
+void test_load_array_ignored(void) {
+    /* 极简解析器遇到数组会失败，但至少不 crash */
+    const char *p = write_temp_config(
+        "{\n"
+        "  \"port\": 7777,\n"
+        "  \"arr\": [1, 2, 3]\n"
+        "}\n"
+    );
+    cocoon_config_t cfg = {0};
+    config_load_from_file(p, &cfg);
+    TEST_ASSERT_TRUE(1); /* 走到这里说明没 crash */
+    free((void *)cfg.root_dir);
+    cleanup(p);
+}
+
+void test_merge_cmdline_null_root_dir(void) {
+    /* cmdline root_dir 为 NULL，不应覆盖 base */
+    cocoon_config_t base = {.root_dir = strdup("/old"), .port = 8080};
+    cocoon_config_t cmdline = {.root_dir = NULL, .port = 9090};
+    config_merge(&base, &cmdline, true, true, false, false, false, false);
+    TEST_ASSERT_EQUAL_STRING("/old", base.root_dir); /* NULL 不覆盖 */
+    TEST_ASSERT_EQUAL(9090, base.port);               /* port 覆盖 */
+    free((void *)base.root_dir);
+}
+
 void test_merge_null_safety(void) {
     /* 不应 crash */
     config_merge(NULL, NULL, true, true, true, true, true, true);
@@ -196,11 +259,16 @@ int main(void) {
     RUN_TEST(test_load_missing_file);
     RUN_TEST(test_load_empty_file);
     RUN_TEST(test_load_null_args);
+    RUN_TEST(test_load_invalid_field_type);
+    RUN_TEST(test_load_log_level_invalid);
+    RUN_TEST(test_load_nested_ignored);
+    RUN_TEST(test_load_array_ignored);
 
     RUN_TEST(test_merge_override_all);
     RUN_TEST(test_merge_no_override);
     RUN_TEST(test_merge_partial_override);
     RUN_TEST(test_merge_null_safety);
+    RUN_TEST(test_merge_cmdline_null_root_dir);
 
     return UNITY_END();
 }

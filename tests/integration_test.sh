@@ -219,14 +219,9 @@ assert_post_multipart() {
     local resp
     local boundary="----CocoonTestBoundary"
     local body
-    body="--${boundary}\r\n"
-    body+="Content-Disposition: form-data; name=\"file\"; filename=\"upload_test.txt\"\r\n"
-    body+="Content-Type: text/plain\r\n"
-    body+="\r\n"
-    body+="Cocoon multipart upload test content\r\n"
-    body+="--${boundary}--\r\n"
+    body=$(printf -- '--%s\r\nContent-Disposition: form-data; name="file"; filename="upload_test.txt"\r\nContent-Type: text/plain\r\n\r\nCocoon multipart upload test content\r\n--%s--\r\n' "$boundary" "$boundary")
     
-    resp=$(curl -s -X POST -H "Content-Type: multipart/form-data; boundary=${boundary}" -d "$body" "$url")
+    resp=$(curl -s -X POST -H "Content-Type: multipart/form-data; boundary=${boundary}" --data-binary "$body" "$url")
     if echo "$resp" | grep -q '"uploaded"'; then
         echo "  ✓ $desc — 响应包含上传结果"
         pass

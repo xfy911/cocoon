@@ -13,7 +13,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* === 错误码 === */
+#include "log.h"
+
 #define COCOON_OK           0   /**< 成功 */
 #define COCOON_ERROR       -1   /**< 通用错误 */
 #define COCOON_NOMEM       -2   /**< 内存不足 */
@@ -32,7 +33,9 @@ typedef struct cocoon_config {
     uint16_t    port;           /**< 监听端口 */
     bool        threaded;       /**< 是否启用多线程调度 */
     uint32_t    num_workers;    /**< 工作线程数（0 = 自动检测） */
-    bool        verbose;        /**< 详细日志输出 */
+    uint32_t    max_connections; /**< 最大并发连接数（0 = 无限制） */
+    uint32_t    timeout_ms;      /**< 连接空闲超时毫秒（0 = 默认30000） */
+    log_level_t log_level;       /**< 日志级别 */
 } cocoon_config_t;
 
 /* === 服务器生命周期 API === */

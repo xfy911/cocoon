@@ -10,6 +10,11 @@
  *   主线程: socket() → bind() → listen() → accept() → 创建协程
  *   协程:   读取请求 → 解析 HTTP → 服务静态资源 → 关闭连接
  *
+ * 新增功能（2026-06-03）:
+ *   - 连接空闲超时管理（自动清理僵尸连接）
+ *   - 最大并发连接数限制（防止资源耗尽）
+ *   - 分级日志输出（替代 printf）
+ *
  * @author xfy
  */
 
@@ -17,6 +22,7 @@
 #include "http.h"
 #include "static.h"
 #include "cocoon.h"
+#include "log.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,37 +34,40 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/stat.h>
+#include <stdatomic.h>
 
 #include "../coco/include/coco.h"
 
 /* 单个连接缓冲区大小 */
 #define CONN_BUF_SIZE   8192
-/* 连接超时（毫秒） */
+/* 默认连接超时（毫秒） */
 #define CONN_TIMEOUT_MS 30000
 
 /**
  * connection_t - 单个客户端连接上下文
  *
- * 包含 socket fd、接收缓冲区、解析状态。
+ * 包含 socket fd、接收缓冲区、解析状态、超时管理。
  */
 typedef struct {
-    int         fd;             /**< 客户端 socket */
-    char        buf[CONN_BUF_SIZE]; /**< 接收缓冲区 */
-    size_t      buf_len;        /**< 缓冲区已用长度 */
-    bool        keep_alive;     /**< 当前连接是否保持 */
-    bool        closed;         /**< 连接是否已关闭 */
-    const char *root_dir;       /**< 静态资源根目录（引用，不拥有） */
+    int             fd;             /**< 客户端 socket */
+    char            buf[CONN_BUF_SIZE]; /**< 接收缓冲区 */
+    size_t          buf_len;        /**< 缓冲区已用长度 */
+    bool            keep_alive;     /**< 当前连接是否保持 */
+    bool            closed;         /**< 连接是否已关闭 */
+    const char     *root_dir;       /**< 静态资源根目录（引用，不拥有） */
+    uint32_t        timeout_ms;     /**< 连接空闲超时毫秒（从配置复制） */
+    coco_timer_t   *timer;          /**< 空闲超时定时器 */
+    coco_coro_t    *coro;           /**< 当前处理协程 */
 } connection_t;
-
-/**
- * server_context - 服务器运行时上下文
- */
 struct server_context {
     int                 listen_fd;    /**< 监听 socket */
     cocoon_config_t     config;       /**< 配置副本 */
     volatile int        running;      /**< 运行标志 */
     coco_sched_t       *sched;        /**< 协程调度器 */
 };
+
+/* 全局活跃连接计数器（线程安全） */
+static atomic_int g_active_connections = 0;
 
 /**
  * set_nonblocking - 设置 socket 为非阻塞模式
@@ -73,7 +82,7 @@ static void set_nonblocking(int fd) {
 /**
  * close_connection - 安全关闭连接
  *
- * 关闭 socket 并释放连接结构体内存。
+ * 关闭 socket，递减活跃连接计数。
  *
  * @param conn 连接上下文
  */
@@ -82,6 +91,7 @@ static void close_connection(connection_t *conn) {
         close(conn->fd);
         conn->fd = -1;
         conn->closed = true;
+        atomic_fetch_sub(&g_active_connections, 1);
     }
 }
 
@@ -214,6 +224,59 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
 }
 
 /**
+ * conn_timeout_handler - 连接空闲超时回调
+ *
+ * 定时器触发时关闭 socket，唤醒阻塞在 coco_read 的协程，
+ * 并发起协程取消请求。
+ *
+ * @param arg 连接上下文指针
+ */
+static void conn_timeout_handler(void *arg) {
+    connection_t *conn = (connection_t *)arg;
+    if (!conn) return;
+
+    conn->timer = NULL;  /* 定时器已触发，自动释放 */
+
+    if (conn->fd >= 0) {
+        log_debug("连接 fd=%d 空闲超时，强制关闭", conn->fd);
+        conn->closed = true;
+        /* shutdown 唤醒阻塞在 coco_read 的协程 */
+        shutdown(conn->fd, SHUT_RDWR);
+    }
+
+    if (conn->coro) {
+        coco_cancel(conn->coro);
+    }
+}
+
+/**
+ * conn_reset_timer - 重置连接空闲定时器
+ *
+ * 每次收到数据时调用，取消旧定时器并创建新定时器。
+ *
+ * @param conn 连接上下文
+ * @param timeout_ms 超时毫秒数
+ */
+static void conn_reset_timer(connection_t *conn, uint32_t timeout_ms) {
+    if (conn->timer) {
+        coco_timer_cancel(conn->timer);
+    }
+    conn->timer = coco_timer(timeout_ms, conn_timeout_handler, conn);
+}
+
+/**
+ * conn_cancel_timer - 取消连接定时器
+ *
+ * @param conn 连接上下文
+ */
+static void conn_cancel_timer(connection_t *conn) {
+    if (conn->timer) {
+        coco_timer_cancel(conn->timer);
+        conn->timer = NULL;
+    }
+}
+
+/**
  * client_handler - 客户端连接协程入口
  *
  * 每个连接一个协程，循环读取请求并处理，直到连接关闭或超时。
@@ -224,6 +287,12 @@ static void client_handler(void *arg) {
     connection_t *conn = (connection_t *)arg;
     if (!conn) return;
 
+    conn->coro = coco_self();
+
+    /* 启动空闲定时器 */
+    uint32_t timeout_ms = conn->timeout_ms > 0 ? conn->timeout_ms : CONN_TIMEOUT_MS;
+    conn->timer = coco_timer(timeout_ms, conn_timeout_handler, conn);
+
     while (!conn->closed) {
         /* 读取数据 */
         ssize_t n = conn_read(conn);
@@ -232,11 +301,15 @@ static void client_handler(void *arg) {
                 /* 数据不足，继续等待 */
                 continue;
             }
-            break; /* 错误 */
+            /* coco_read 返回负值错误码（如 COCO_ERROR_CANCELLED）或系统错误 */
+            break;
         }
         if (n == 0) {
             break; /* 对端关闭 */
         }
+
+        /* 有数据读取，重置定时器 */
+        conn_reset_timer(conn, timeout_ms);
 
         /* 尝试处理请求 */
         bool keep = handle_request(conn, conn->root_dir);
@@ -245,6 +318,7 @@ static void client_handler(void *arg) {
         }
     }
 
+    conn_cancel_timer(conn);
     close_connection(conn);
     free(conn);
 }
@@ -261,12 +335,24 @@ static void accept_loop(void *arg) {
     server_context_t *ctx = (server_context_t *)arg;
     if (!ctx) return;
 
-    printf("[Cocoon] 服务器启动于端口 %d\n", ctx->config.port);
-    if (ctx->config.threaded) {
-        printf("[Cocoon] 多线程模式: %d 个工作线程\n",
-               ctx->config.num_workers > 0 ? ctx->config.num_workers : (uint32_t)sysconf(_SC_NPROCESSORS_ONLN));
+    uint32_t num_workers = ctx->config.num_workers;
+    if (num_workers == 0) {
+        num_workers = (uint32_t)sysconf(_SC_NPROCESSORS_ONLN);
+        if (num_workers == 0) num_workers = 4;
     }
-    printf("[Cocoon] 静态资源根目录: %s\n", ctx->config.root_dir);
+
+    log_info("服务器启动于端口 %d", ctx->config.port);
+    if (ctx->config.threaded) {
+        log_info("多线程模式: %d 个工作线程", num_workers);
+    } else {
+        log_info("单线程模式");
+    }
+    log_info("静态资源根目录: %s", ctx->config.root_dir);
+
+    if (ctx->config.max_connections > 0) {
+        log_info("最大并发连接数: %u", ctx->config.max_connections);
+    }
+    log_info("连接空闲超时: %u ms", ctx->config.timeout_ms > 0 ? ctx->config.timeout_ms : CONN_TIMEOUT_MS);
 
     while (ctx->running) {
         struct sockaddr_in client_addr;
@@ -278,8 +364,25 @@ static void accept_loop(void *arg) {
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
                 continue;
             }
-            perror("accept");
+            log_error("accept 失败: %s", strerror(errno));
             break;
+        }
+
+        /* 检查最大连接数限制 */
+        if (ctx->config.max_connections > 0) {
+            int current = atomic_load(&g_active_connections);
+            if (current >= (int)ctx->config.max_connections) {
+                log_warn("连接数已达上限 (%d/%u)，拒绝新连接 fd=%d",
+                         current, ctx->config.max_connections, client_fd);
+                /* 发送 503 后关闭 */
+                const char *resp = "HTTP/1.1 503 Service Unavailable\r\n"
+                                     "Content-Length: 0\r\n"
+                                     "Connection: close\r\n\r\n";
+                ssize_t wr = write(client_fd, resp, strlen(resp));
+                (void)wr;
+                close(client_fd);
+                continue;
+            }
         }
 
         /* 设置 TCP_NODELAY 减少延迟 */
@@ -296,12 +399,19 @@ static void accept_loop(void *arg) {
         conn->keep_alive = true;
         conn->closed = false;
         conn->root_dir = ctx->config.root_dir;
+        conn->timeout_ms = ctx->config.timeout_ms > 0 ? ctx->config.timeout_ms : CONN_TIMEOUT_MS;
+
+        atomic_fetch_add(&g_active_connections, 1);
+        log_debug("新连接 fd=%d，当前活跃连接: %d", client_fd,
+                  atomic_load(&g_active_connections));
 
         if (ctx->config.threaded && coco_sched_get_current()) {
             /* 多线程协程模式：创建协程处理连接 */
             coco_coro_t *coro = coco_create(coco_sched_get_current(),
                                             client_handler, conn, 0);
             if (!coro) {
+                log_error("创建协程失败，关闭连接 fd=%d", client_fd);
+                atomic_fetch_sub(&g_active_connections, 1);
                 close_connection(conn);
                 free(conn);
             }
@@ -390,7 +500,7 @@ int server_start(server_context_t *ctx) {
         /* 启动全局调度器 */
         int ret = coco_global_sched_start(num_workers);
         if (ret != COCO_OK) {
-            fprintf(stderr, "[Cocoon] 启动多线程调度器失败: %d\n", ret);
+            log_error("启动多线程调度器失败: %d", ret);
             return COCOON_ERROR;
         }
 

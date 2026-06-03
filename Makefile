@@ -20,7 +20,7 @@ PREFIX ?= /usr/local
 BINDIR = $(PREFIX)/bin
 
 # 源文件
-SRCS = main.c server.c http.c static.c
+SRCS = main.c server.c http.c static.c log.c
 OBJS = $(SRCS:.c=.o)
 TARGET = cocoon
 

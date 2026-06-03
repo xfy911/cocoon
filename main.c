@@ -45,7 +45,10 @@ static void print_usage(const char *prog) {
     printf("  -p <port>   监听端口（默认 8080）\n");
     printf("  -t          启用多线程调度\n");
     printf("  -w <num>    工作线程数（默认自动检测 CPU 核心）\n");
-    printf("  -v          详细日志输出\n");
+    printf("  -m <num>    最大并发连接数（默认无限制）\n");
+    printf("  -o <ms>     连接空闲超时毫秒（默认 30000）\n");
+    printf("  -l <level>  日志级别: error, warn, info, debug（默认 info）\n");
+    printf("  -v          详细日志输出（等同于 -l debug）\n");
     printf("  -h          显示此帮助\n");
     printf("\nExample:\n");
     printf("  %s -r ./www -p 8080\n", prog);
@@ -66,7 +69,9 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
     config->port = 8080;
     config->threaded = false;
     config->num_workers = 0;
-    config->verbose = false;
+    config->max_connections = 0;
+    config->timeout_ms = 0;
+    config->log_level = LOG_LEVEL_INFO;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-r") == 0) {
@@ -81,8 +86,24 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
         } else if (strcmp(argv[i], "-w") == 0) {
             if (++i >= argc) return false;
             config->num_workers = (uint32_t)atoi(argv[i]);
+        } else if (strcmp(argv[i], "-m") == 0) {
+            if (++i >= argc) return false;
+            config->max_connections = (uint32_t)atoi(argv[i]);
+        } else if (strcmp(argv[i], "-o") == 0) {
+            if (++i >= argc) return false;
+            config->timeout_ms = (uint32_t)atoi(argv[i]);
+        } else if (strcmp(argv[i], "-l") == 0) {
+            if (++i >= argc) return false;
+            if (strcmp(argv[i], "error") == 0) config->log_level = LOG_LEVEL_ERROR;
+            else if (strcmp(argv[i], "warn") == 0) config->log_level = LOG_LEVEL_WARN;
+            else if (strcmp(argv[i], "info") == 0) config->log_level = LOG_LEVEL_INFO;
+            else if (strcmp(argv[i], "debug") == 0) config->log_level = LOG_LEVEL_DEBUG;
+            else {
+                fprintf(stderr, "Unknown log level: %s\n", argv[i]);
+                return false;
+            }
         } else if (strcmp(argv[i], "-v") == 0) {
-            config->verbose = true;
+            config->log_level = LOG_LEVEL_DEBUG;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             exit(0);
@@ -120,6 +141,9 @@ int main(int argc, char *argv[]) {
     /* 注册信号处理 */
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+
+    /* 设置日志级别 */
+    log_set_level(config.log_level);
 
     /* 创建服务器 */
     g_ctx = server_create(&config);

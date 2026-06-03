@@ -54,6 +54,11 @@ typedef struct {
     char if_modified_since[64];
     bool has_if_none_match;
     bool has_if_modified_since;
+    
+    /* 压缩相关头 */
+    bool accept_gzip;       /* 客户端支持 gzip */
+    bool accept_deflate;    /* 客户端支持 deflate */
+    bool has_accept_encoding;
 } http_request_t;
 
 /* === HTTP 响应 === */

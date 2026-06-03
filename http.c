@@ -66,6 +66,9 @@ static void parse_headers(const char **p, const char *end, http_request_t *req) 
     req->range_end = -1;
     req->has_if_none_match = false;
     req->has_if_modified_since = false;
+    req->accept_gzip = false;
+    req->accept_deflate = false;
+    req->has_accept_encoding = false;
 
     while (*p < end && req->num_headers < HTTP_MAX_HEADERS) {
         const char *line_start = *p;
@@ -122,7 +125,11 @@ static void parse_headers(const char **p, const char *end, http_request_t *req) 
                     if (copy_len >= 64) copy_len = 63;
                     memcpy(req->if_modified_since, req->headers[req->num_headers].value, copy_len);
                     req->if_modified_since[copy_len] = '\0';
-                } else if (strcmp(req->headers[req->num_headers].name, "range") == 0) {
+                } else if (strcmp(req->headers[req->num_headers].name, "accept-encoding") == 0) {
+                    req->has_accept_encoding = true;
+                    const char *val = req->headers[req->num_headers].value;
+                    if (strstr(val, "gzip") != NULL) req->accept_gzip = true;
+                    if (strstr(val, "deflate") != NULL) req->accept_deflate = true;
                     /* 解析 Range: bytes=start-end */
                     const char *range_val = req->headers[req->num_headers].value;
                     if (strncasecmp(range_val, "bytes=", 6) == 0) {

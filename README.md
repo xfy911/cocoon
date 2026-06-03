@@ -24,20 +24,28 @@
 ### 依赖
 
 - GCC / Clang（C11 标准）
-- [coco](https://github.com/DefectingCat/coco) 协程库（已编译）
+- [coco](https://github.com/xfy911/coco) 协程库（通过 git submodule 自动获取）
 - Linux（内核 ≥ 5.1，支持 io_uring）/ macOS
+- CMake 3.10+（用于构建 coco 依赖）
 
 ### 构建
 
 ```bash
-git clone https://github.com/xfy911/cocoon.git
+git clone --recursive https://github.com/xfy911/cocoon.git
 cd cocoon
 
-# 默认使用 ../coco 作为 coco 库路径
-make
+# 如果 clone 时忘了 --recursive，补初始化 submodule
+git submodule update --init --recursive
 
-# 或指定路径
-make COCO_INCLUDE=/path/to/coco/include COCO_LIB=/path/to/coco/build
+# 构建 cocoon（会自动检测并构建 coco 依赖）
+make build-all
+
+# 或者分开构建
+make deps   # 先构建 coco
+make        # 再构建 cocoon
+
+# 也可以使用系统上已有的 coco
+make COCO_DIR=/path/to/coco
 ```
 
 ### 运行

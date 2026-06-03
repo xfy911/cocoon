@@ -12,6 +12,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <stdlib.h>
 
 /**
  * http_method_str - HTTP 方法枚举转字符串
@@ -63,6 +64,8 @@ static void parse_headers(const char **p, const char *end, http_request_t *req) 
     req->has_range = false;
     req->range_start = 0;
     req->range_end = -1;
+    req->has_if_none_match = false;
+    req->has_if_modified_since = false;
 
     while (*p < end && req->num_headers < HTTP_MAX_HEADERS) {
         const char *line_start = *p;
@@ -107,6 +110,18 @@ static void parse_headers(const char **p, const char *end, http_request_t *req) 
                     req->content_length = atoll(req->headers[req->num_headers].value);
                 } else if (strcmp(req->headers[req->num_headers].name, "connection") == 0) {
                     req->keep_alive = (strcasecmp(req->headers[req->num_headers].value, "keep-alive") == 0);
+                } else if (strcmp(req->headers[req->num_headers].name, "if-none-match") == 0) {
+                    req->has_if_none_match = true;
+                    int copy_len = strlen(req->headers[req->num_headers].value);
+                    if (copy_len >= 64) copy_len = 63;
+                    memcpy(req->if_none_match, req->headers[req->num_headers].value, copy_len);
+                    req->if_none_match[copy_len] = '\0';
+                } else if (strcmp(req->headers[req->num_headers].name, "if-modified-since") == 0) {
+                    req->has_if_modified_since = true;
+                    int copy_len = strlen(req->headers[req->num_headers].value);
+                    if (copy_len >= 64) copy_len = 63;
+                    memcpy(req->if_modified_since, req->headers[req->num_headers].value, copy_len);
+                    req->if_modified_since[copy_len] = '\0';
                 } else if (strcmp(req->headers[req->num_headers].name, "range") == 0) {
                     /* 解析 Range: bytes=start-end */
                     const char *range_val = req->headers[req->num_headers].value;

@@ -173,8 +173,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
             static_send_error(conn->fd, 403, req.keep_alive);
             return req.keep_alive;
         }
-        strncpy(real_path, resolved, sizeof(real_path) - 1);
-        real_path[sizeof(real_path) - 1] = '\0';
+        snprintf(real_path, sizeof(real_path), "%s", resolved);
     }
 
     /* 判断文件类型 */
@@ -187,13 +186,18 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     if (S_ISDIR(st.st_mode)) {
         /* 目录：尝试 index.html */
         char index_path[4096];
-        snprintf(index_path, sizeof(index_path), "%s/index.html", real_path);
+        if (snprintf(index_path, sizeof(index_path), "%s/index.html", real_path) >= (int)sizeof(index_path)) {
+            static_send_error(conn->fd, 400, req.keep_alive);
+            return req.keep_alive;
+        }
         struct stat index_st;
         if (stat(index_path, &index_st) == 0 && S_ISREG(index_st.st_mode)) {
             /* 有 index.html，作为文件服务 */
             http_request_t index_req = req;
-            strncpy(index_req.path, req.path, sizeof(index_req.path) - 1);
-            strncat(index_req.path, "/index.html", sizeof(index_req.path) - strlen(index_req.path) - 1);
+            if (snprintf(index_req.path, sizeof(index_req.path), "%s/index.html", req.path) >= (int)sizeof(index_req.path)) {
+                static_send_error(conn->fd, 400, req.keep_alive);
+                return req.keep_alive;
+            }
             static_serve_file(conn->fd, &index_req, root_dir);
         } else {
             /* 无 index.html，生成目录列表 */

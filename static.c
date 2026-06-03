@@ -40,8 +40,7 @@ static bool safe_path_join(char *dst, size_t dst_size,
     /* 先规范化根目录 */
     char root_normalized[4096];
     if (!realpath(root, root_normalized)) {
-        strncpy(root_normalized, root, sizeof(root_normalized) - 1);
-        root_normalized[sizeof(root_normalized) - 1] = '\0';
+        snprintf(root_normalized, sizeof(root_normalized), "%s", root);
     }
     size_t root_len = strlen(root_normalized);
 
@@ -57,8 +56,7 @@ static bool safe_path_join(char *dst, size_t dst_size,
             if (strncmp(resolved, root_normalized, root_len) != 0) {
                 return false;
             }
-            strncpy(dst, resolved, dst_size - 1);
-            dst[dst_size - 1] = '\0';
+            snprintf(dst, dst_size, "%s", resolved);
             return true;
         }
         return false;
@@ -301,6 +299,8 @@ static void html_escape(const char *src, char *dst, size_t dst_size) {
  */
 int static_serve_directory(int fd, const http_request_t *req,
                            const char *root_dir, const char *real_path) {
+    (void)root_dir;    /* 未直接使用，real_path 已通过 safe_path_join 处理 */
+    
     /* 检查目录是否可访问 */
     struct stat st;
     if (stat(real_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
@@ -333,7 +333,7 @@ int static_serve_directory(int fd, const http_request_t *req,
         "<style>"
         "body{font-family:system-ui,-apple-system,sans-serif;max-width:800px;margin:40px auto;padding:0 20px}"
         "h1{border-bottom:1px solid #ddd;padding-bottom:10px}"
-        "table{width:100%;border-collapse:collapse}"
+        "table{width:100%%;border-collapse:collapse}"
         "th{text-align:left;padding:8px;border-bottom:2px solid #ddd}"
         "td{padding:8px;border-bottom:1px solid #eee}"
         "a{text-decoration:none;color:#0066cc}"

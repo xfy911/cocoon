@@ -48,6 +48,12 @@ typedef struct {
     bool has_range;
     int64_t range_start;
     int64_t range_end;
+    
+    /* 缓存相关头 */
+    char if_none_match[64];
+    char if_modified_since[64];
+    bool has_if_none_match;
+    bool has_if_modified_since;
 } http_request_t;
 
 /* === HTTP 响应 === */
@@ -61,6 +67,10 @@ typedef struct {
     int64_t range_start;
     int64_t range_end;
     int64_t total_length;
+    
+    /* 缓存 */
+    const char *etag;
+    const char *last_modified;
 } http_response_t;
 
 /* === API === */

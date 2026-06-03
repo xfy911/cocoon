@@ -142,7 +142,11 @@ static void parse_headers(const char **p, const char *end, http_request_t *req) 
                         req->range_start = atoll(range_val + 6);
                         const char *dash = strchr(range_val + 6, '-');
                         if (dash) {
-                            req->range_end = atoll(dash + 1);
+                            if (dash[1] == '\0') {
+                                req->range_end = -1;  /* open-end range */
+                            } else {
+                                req->range_end = atoll(dash + 1);
+                            }
                         }
                     }
                 }
@@ -209,8 +213,15 @@ int http_parse_request(const char *buf, size_t len, http_request_t *req) {
     const char *end = buf + len;
     parse_headers(&p, end, req);
 
-    /* HTTP/1.1 默认 keep-alive */
-    if (strstr(req->version, "1.1") != NULL) {
+    /* HTTP/1.1 默认 keep-alive，但 Connection 头可覆盖 */
+    bool has_connection = false;
+    for (int i = 0; i < req->num_headers; i++) {
+        if (strcmp(req->headers[i].name, "connection") == 0) {
+            has_connection = true;
+            break;
+        }
+    }
+    if (!has_connection && strstr(req->version, "1.1") != NULL) {
         req->keep_alive = true;
     }
 

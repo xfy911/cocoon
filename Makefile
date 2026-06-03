@@ -20,9 +20,16 @@ PREFIX ?= /usr/local
 BINDIR = $(PREFIX)/bin
 
 # 源文件
-SRCS = main.c server.c http.c static.c log.c
+SRCS = main.c server.c http.c static.c log.c config.c
 OBJS = $(SRCS:.c=.o)
 TARGET = cocoon
+
+# 单元测试
+UNITY_SRC = tests/unity/unity.c
+UNIT_TEST_DIR = tests/unit
+UNIT_TEST_SRCS = $(wildcard $(UNIT_TEST_DIR)/test_*.c)
+UNIT_TEST_OBJS = $(UNIT_TEST_SRCS:.c=.o)
+UNIT_TEST_BINS = $(UNIT_TEST_SRCS:.c=)
 
 # 默认目标
 all: $(TARGET)
@@ -53,6 +60,30 @@ bench: $(TARGET)
 	@echo "[Cocoon] 运行性能基准..."
 	@./tests/benchmark.sh
 
+# 单元测试
+unit-test: $(UNIT_TEST_BINS)
+	@echo "[Cocoon] 运行单元测试..."
+	@failed=0; \
+	for bin in $(UNIT_TEST_BINS); do \
+		echo "--- $$bin ---"; \
+		if ! ./$$bin; then \
+			failed=$$((failed + 1)); \
+		fi; \
+	done; \
+	if [ $$failed -gt 0 ]; then \
+		echo "[Cocoon] $$failed 个单元测试失败"; \
+		exit 1; \
+	else \
+		echo "[Cocoon] 全部单元测试通过 ✓"; \
+	fi
+
+# 单元测试编译规则
+$(UNIT_TEST_DIR)/test_http: $(UNIT_TEST_DIR)/test_http.c http.c log.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_http.c http.c log.c $(UNITY_SRC) -lm
+
+$(UNIT_TEST_DIR)/test_static: $(UNIT_TEST_DIR)/test_static.c http.c log.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_static.c http.c log.c $(UNITY_SRC) -lm -lz
+
 # 编译规则
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -69,8 +100,9 @@ uninstall:
 # 清理
 clean:
 	rm -f $(OBJS) $(TARGET)
+	rm -f $(UNIT_TEST_OBJS) $(UNIT_TEST_BINS)
 
 # 重新构建
 rebuild: clean all
 
-.PHONY: all clean install uninstall rebuild deps build-all
+.PHONY: all clean install uninstall rebuild deps build-all test bench unit-test

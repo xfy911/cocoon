@@ -1,13 +1,14 @@
 /**
  * main.c - Cocoon 入口
  *
- * 解析命令行参数，初始化并启动服务器。
+ * 解析命令行参数和配置文件，初始化并启动服务器。
  *
  * @author xfy
  */
 
 #include "cocoon.h"
 #include "server.h"
+#include "config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,7 +42,8 @@ static void signal_handler(int sig) {
 static void print_usage(const char *prog) {
     printf("Usage: %s [options]\n\n", prog);
     printf("Options:\n");
-    printf("  -r <dir>    静态资源根目录（必填）\n");
+    printf("  -c <file>  JSON 配置文件路径\n");
+    printf("  -r <dir>    静态资源根目录（必填，或配置文件指定）\n");
     printf("  -p <port>   监听端口（默认 8080）\n");
     printf("  -t          启用多线程调度\n");
     printf("  -w <num>    工作线程数（默认自动检测 CPU 核心）\n");
@@ -51,12 +53,15 @@ static void print_usage(const char *prog) {
     printf("  -v          详细日志输出（等同于 -l debug）\n");
     printf("  -h          显示此帮助\n");
     printf("\nExample:\n");
+    printf("  %s -c cocoon.json\n", prog);
     printf("  %s -r ./www -p 8080\n", prog);
-    printf("  %s -r ./www -p 8080 -t -w 8\n", prog);
+    printf("  %s -c cocoon.json -p 9090  # 命令行覆盖配置文件的端口\n", prog);
 }
 
 /**
  * parse_args - 解析命令行参数
+ *
+ * 支持配置文件 + 命令行覆盖的混合模式。
  *
  * @param argc 参数个数
  * @param argv 参数数组
@@ -73,25 +78,41 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
     config->timeout_ms = 0;
     config->log_level = LOG_LEVEL_INFO;
 
+    bool has_root_dir = false;
+    bool has_port = false;
+    bool has_workers = false;
+    bool has_max_conn = false;
+    bool has_timeout = false;
+    bool has_log_level = false;
+    const char *config_file = NULL;
+
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-r") == 0) {
+        if (strcmp(argv[i], "-c") == 0) {
+            if (++i >= argc) return false;
+            config_file = argv[i];
+        } else if (strcmp(argv[i], "-r") == 0) {
             if (++i >= argc) return false;
             config->root_dir = argv[i];
+            has_root_dir = true;
         } else if (strcmp(argv[i], "-p") == 0) {
             if (++i >= argc) return false;
             config->port = (uint16_t)atoi(argv[i]);
             if (config->port == 0) config->port = 8080;
+            has_port = true;
         } else if (strcmp(argv[i], "-t") == 0) {
             config->threaded = true;
         } else if (strcmp(argv[i], "-w") == 0) {
             if (++i >= argc) return false;
             config->num_workers = (uint32_t)atoi(argv[i]);
+            has_workers = true;
         } else if (strcmp(argv[i], "-m") == 0) {
             if (++i >= argc) return false;
             config->max_connections = (uint32_t)atoi(argv[i]);
+            has_max_conn = true;
         } else if (strcmp(argv[i], "-o") == 0) {
             if (++i >= argc) return false;
             config->timeout_ms = (uint32_t)atoi(argv[i]);
+            has_timeout = true;
         } else if (strcmp(argv[i], "-l") == 0) {
             if (++i >= argc) return false;
             if (strcmp(argv[i], "error") == 0) config->log_level = LOG_LEVEL_ERROR;
@@ -102,8 +123,10 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
                 fprintf(stderr, "Unknown log level: %s\n", argv[i]);
                 return false;
             }
+            has_log_level = true;
         } else if (strcmp(argv[i], "-v") == 0) {
             config->log_level = LOG_LEVEL_DEBUG;
+            has_log_level = true;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             exit(0);
@@ -113,8 +136,19 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
         }
     }
 
+    /* 如果有配置文件，先加载 */
+    if (config_file) {
+        if (!config_load_from_file(config_file, config)) {
+            fprintf(stderr, "Error: 无法加载配置文件: %s\n", config_file);
+            return false;
+        }
+        /* 用命令行参数覆盖配置文件 */
+        config_merge(config, config, has_root_dir, has_port, has_workers,
+                     has_max_conn, has_timeout, has_log_level);
+    }
+
     if (!config->root_dir) {
-        fprintf(stderr, "Error: 必须指定静态资源根目录（-r <dir>）\n");
+        fprintf(stderr, "Error: 必须指定静态资源根目录（-r <dir> 或配置文件）\n");
         return false;
     }
 
@@ -158,6 +192,12 @@ int main(int argc, char *argv[]) {
     /* 清理 */
     server_destroy(g_ctx);
     g_ctx = NULL;
+
+    /* 释放配置文件分配的 root_dir */
+    if (config.root_dir) {
+        free((void *)config.root_dir);
+        config.root_dir = NULL;
+    }
 
     return ret == COCOON_OK ? 0 : 1;
 }

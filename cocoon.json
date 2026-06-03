@@ -1,0 +1,9 @@
+{
+    "root_dir": "./examples/www",
+    "port": 8080,
+    "threaded": true,
+    "num_workers": 4,
+    "max_connections": 10000,
+    "timeout_ms": 30000,
+    "log_level": "info"
+}

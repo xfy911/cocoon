@@ -127,9 +127,134 @@ static ssize_t conn_read(connection_t *conn) {
 }
 
 /**
+ * conn_read_body - 读取请求体
+ *
+ * 从连接缓冲区或 socket 读取剩余请求体数据。
+ * 如果缓冲区中已有部分数据，优先使用。
+ *
+ * @param conn 连接上下文
+ * @param req HTTP 请求
+ * @param need 需要读取的字节数
+ * @return 0 成功，-1 错误
+ */
+static int conn_read_body(connection_t *conn, http_request_t *req, size_t need) {
+    if (need == 0) return 0;
+    if (need > HTTP_MAX_BODY) {
+        log_warn("请求体过大 (%zu > %d)，拒绝", need, HTTP_MAX_BODY);
+        return -1;
+    }
+
+    req->body = (char *)malloc(need + 1);
+    if (!req->body) return -1;
+    req->body[need] = '\0';
+
+    size_t got = 0;
+
+    /* 先消费缓冲区中的数据 */
+    if (conn->buf_len > 0) {
+        size_t from_buf = conn->buf_len < need ? conn->buf_len : need;
+        memcpy(req->body, conn->buf, from_buf);
+        got = from_buf;
+        if (from_buf < conn->buf_len) {
+            memmove(conn->buf, conn->buf + from_buf, conn->buf_len - from_buf);
+        }
+        conn->buf_len -= from_buf;
+    }
+
+    /* 从 socket 读取剩余数据 */
+    while (got < need) {
+        ssize_t n;
+        if (coco_sched_get_current() != NULL) {
+            n = coco_read(conn->fd, req->body + got, need - got);
+        } else {
+            n = read(conn->fd, req->body + got, need - got);
+        }
+        if (n > 0) {
+            got += (size_t)n;
+        } else if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
+            free(req->body);
+            req->body = NULL;
+            return -1;
+        } else {
+            /* 对端关闭 */
+            free(req->body);
+            req->body = NULL;
+            return -1;
+        }
+    }
+
+    req->body_len = got;
+    return 0;
+}
+
+/**
+ * handle_post_request - 处理 POST 请求
+ *
+ * 目前仅提供 JSON 回显和表单回显，用于测试和 API 场景。
+ * 支持 application/json 和 application/x-www-form-urlencoded。
+ *
+ * @param fd 客户端 socket
+ * @param req HTTP 请求
+ * @return true 保持连接
+ */
+static bool handle_post_request(int fd, const http_request_t *req) {
+    char response[4096];
+    int n = 0;
+
+    n += snprintf(response + n, sizeof(response) - n,
+        "{\"method\":\"%s\",\"path\":\"%s\",\"content_type\":\"%s\",\"body_length\":%zu",
+        http_method_str(req->method), req->path, req->content_type, req->body_len);
+
+    if (req->body_len > 0) {
+        /* 对于 JSON 类型，尝试回显 body */
+        if (strstr(req->content_type, "application/json") != NULL) {
+            n += snprintf(response + n, sizeof(response) - n, ",\"body\": ");
+            /* 直接拼接 JSON body（假设客户端发送的是合法 JSON） */
+            size_t body_copy = req->body_len;
+            if (body_copy > sizeof(response) - n - 64) {
+                body_copy = sizeof(response) - n - 64;
+            }
+            memcpy(response + n, req->body, body_copy);
+            n += (int)body_copy;
+            n += snprintf(response + n, sizeof(response) - n, "}");
+        } else if (strstr(req->content_type, "x-www-form-urlencoded") != NULL) {
+            n += snprintf(response + n, sizeof(response) - n, ",\"body\":\"");
+            size_t body_copy = req->body_len;
+            if (body_copy > sizeof(response) - n - 64) {
+                body_copy = sizeof(response) - n - 64;
+            }
+            memcpy(response + n, req->body, body_copy);
+            n += (int)body_copy;
+            n += snprintf(response + n, sizeof(response) - n, "\"}");
+        } else {
+            n += snprintf(response + n, sizeof(response) - n, "}");
+        }
+    } else {
+        n += snprintf(response + n, sizeof(response) - n, "}");
+    }
+
+    char header[512];
+    int header_len = snprintf(header, sizeof(header),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %d\r\n"
+        "Connection: %s\r\n"
+        "Server: Cocoon/1.0\r\n"
+        "\r\n",
+        n, req->keep_alive ? "keep-alive" : "close");
+
+    send_all(fd, header, (size_t)header_len);
+    send_all(fd, response, (size_t)n);
+
+    return req->keep_alive;
+}
+
+/**
  * handle_request - 处理单个 HTTP 请求
  *
  * 从缓冲区解析请求，判断是文件还是目录，调用对应的服务函数。
+ * 新增：支持 POST 请求体读取和简单回显。
  *
  * @param conn 连接上下文
  * @param root_dir 静态资源根目录
@@ -155,9 +280,26 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     }
     conn->buf_len -= (size_t)parsed;
 
+    /* 读取请求体（如果需要） */
+    if (req.content_length > 0) {
+        size_t need = (size_t)req.content_length;
+        if (conn_read_body(conn, &req, need) != 0) {
+            static_send_error(conn->fd, 413, req.keep_alive); /* Payload Too Large */
+            return req.keep_alive;
+        }
+    }
+
+    /* 处理 POST */
+    if (req.method == HTTP_POST) {
+        bool keep = handle_post_request(conn->fd, &req);
+        http_request_free(&req);
+        return keep;
+    }
+
     /* 只支持 GET 和 HEAD */
     if (req.method != HTTP_GET && req.method != HTTP_HEAD) {
         static_send_error(conn->fd, 405, req.keep_alive);
+        http_request_free(&req);
         return req.keep_alive;
     }
 
@@ -172,6 +314,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     int n = snprintf(real_path, sizeof(real_path), "%s%s", root_normalized, req.path);
     if (n < 0 || (size_t)n >= sizeof(real_path)) {
         static_send_error(conn->fd, 400, req.keep_alive);
+        http_request_free(&req);
         return req.keep_alive;
     }
 
@@ -181,6 +324,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         if (!realpath(real_path, resolved) ||
             strncmp(resolved, root_normalized, strlen(root_normalized)) != 0) {
             static_send_error(conn->fd, 403, req.keep_alive);
+            http_request_free(&req);
             return req.keep_alive;
         }
         snprintf(real_path, sizeof(real_path), "%s", resolved);
@@ -190,6 +334,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     struct stat st;
     if (stat(real_path, &st) != 0) {
         static_send_error(conn->fd, 404, req.keep_alive);
+        http_request_free(&req);
         return req.keep_alive;
     }
 
@@ -198,6 +343,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         char index_path[4096];
         if (snprintf(index_path, sizeof(index_path), "%s/index.html", real_path) >= (int)sizeof(index_path)) {
             static_send_error(conn->fd, 400, req.keep_alive);
+            http_request_free(&req);
             return req.keep_alive;
         }
         struct stat index_st;
@@ -206,6 +352,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
             http_request_t index_req = req;
             if (snprintf(index_req.path, sizeof(index_req.path), "%s/index.html", req.path) >= (int)sizeof(index_req.path)) {
                 static_send_error(conn->fd, 400, req.keep_alive);
+                http_request_free(&req);
                 return req.keep_alive;
             }
             static_serve_file(conn->fd, &index_req, root_dir);
@@ -220,6 +367,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         static_send_error(conn->fd, 403, req.keep_alive);
     }
 
+    http_request_free(&req);
     return req.keep_alive;
 }
 

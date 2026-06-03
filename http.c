@@ -130,6 +130,11 @@ static void parse_headers(const char **p, const char *end, http_request_t *req) 
                     const char *val = req->headers[req->num_headers].value;
                     if (strstr(val, "gzip") != NULL) req->accept_gzip = true;
                     if (strstr(val, "deflate") != NULL) req->accept_deflate = true;
+                } else if (strcmp(req->headers[req->num_headers].name, "content-type") == 0) {
+                    int copy_len = strlen(req->headers[req->num_headers].value);
+                    if (copy_len >= HTTP_HEADER_VALUE_MAX) copy_len = HTTP_HEADER_VALUE_MAX - 1;
+                    memcpy(req->content_type, req->headers[req->num_headers].value, copy_len);
+                    req->content_type[copy_len] = '\0';
                 } else if (strcmp(req->headers[req->num_headers].name, "range") == 0) {
                     const char *range_val = req->headers[req->num_headers].value;
                     if (strncasecmp(range_val, "bytes=", 6) == 0) {
@@ -270,6 +275,19 @@ int http_format_response_header(char *buf, size_t buf_size, const http_response_
 
     if ((size_t)n >= buf_size) return -1;
     return n;
+}
+
+/**
+ * http_request_free - 释放 HTTP 请求中动态分配的资源
+ *
+ * @param req 请求结构体
+ */
+void http_request_free(http_request_t *req) {
+    if (req && req->body) {
+        free(req->body);
+        req->body = NULL;
+        req->body_len = 0;
+    }
 }
 
 /**

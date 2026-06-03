@@ -11,6 +11,19 @@
 #include <stdbool.h>
 
 /**
+ * send_all - 确保缓冲区全部发送
+ *
+ * 使用 write 循环发送，直到全部数据发送完毕或遇到不可恢复错误。
+ * 内部辅助函数，也可被其他模块调用。
+ *
+ * @param fd socket 文件描述符
+ * @param buf 数据缓冲区
+ * @param len 数据长度
+ * @return 0 成功，-1 失败
+ */
+int send_all(int fd, const char *buf, size_t len);
+
+/**
  * static_serve_file - 服务单个静态文件
  *
  * 打开文件，根据请求判断是否需要发送部分内容（Range），

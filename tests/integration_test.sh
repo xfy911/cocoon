@@ -213,6 +213,52 @@ assert_304_modified_since() {
     fi
 }
 
+assert_post_json() {
+    local url="$1"
+    local body="$2"
+    local expect="$3"
+    local desc="${4:-$url}"
+    local resp
+    resp=$(curl -s -X POST -H "Content-Type: application/json" -d "$body" "$url")
+    if echo "$resp" | grep -q "$expect"; then
+        echo "  ✓ $desc — 响应包含 '$expect'"
+        pass
+    else
+        echo "  ✗ $desc — 响应期望包含 '$expect', 实际: $resp"
+        fail
+    fi
+}
+
+assert_post_form() {
+    local url="$1"
+    local body="$2"
+    local expect="$3"
+    local desc="${4:-$url}"
+    local resp
+    resp=$(curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "$body" "$url")
+    if echo "$resp" | grep -q "$expect"; then
+        echo "  ✓ $desc — 响应包含 '$expect'"
+        pass
+    else
+        echo "  ✗ $desc — 响应期望包含 '$expect', 实际: $resp"
+        fail
+    fi
+}
+
+assert_status_405() {
+    local url="$1"
+    local desc="${2:-$url}"
+    local status
+    status=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$url")
+    if [[ "$status" == "405" ]]; then
+        echo "  ✓ $desc — PUT 返回 405"
+        pass
+    else
+        echo "  ✗ $desc — 期望 405, 实际 $status"
+        fail
+    fi
+}
+
 # ===== 测试开始 =====
 start_server
 
@@ -276,6 +322,12 @@ assert_header_contains "$BASE/style.css" "Content-Type" "text/css" "CSS MIME"
 assert_header_contains "$BASE/app.js" "Content-Type" "application/javascript" "JS MIME"
 assert_header_contains "$BASE/api.json" "Content-Type" "application/json" "JSON MIME"
 assert_header_contains "$BASE/image.png" "Content-Type" "image/" "PNG MIME"
+
+echo ""
+echo "=== POST 请求测试 ==="
+assert_post_json "$BASE/api/echo" '{"test": "hello"}' '"test"' "POST JSON 回显"
+assert_post_form "$BASE/api/echo" 'name=cocoon&version=1.0' 'cocoon' "POST 表单回显"
+assert_status_405 "$BASE/index.html" "PUT 405"
 
 echo ""
 echo "=== 结果汇总 ==="

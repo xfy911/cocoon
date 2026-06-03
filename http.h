@@ -29,6 +29,7 @@ typedef enum {
 #define HTTP_MAX_HEADERS    32
 #define HTTP_HEADER_NAME_MAX 64
 #define HTTP_HEADER_VALUE_MAX 1024
+#define HTTP_MAX_BODY       8388608  /* 8MB 最大请求体 */
 
 typedef struct {
     http_method_t method;
@@ -59,6 +60,11 @@ typedef struct {
     bool accept_gzip;       /* 客户端支持 gzip */
     bool accept_deflate;    /* 客户端支持 deflate */
     bool has_accept_encoding;
+
+    /* 请求体 */
+    char *body;             /* 请求体数据（动态分配） */
+    size_t body_len;        /* 请求体实际长度 */
+    char content_type[HTTP_HEADER_VALUE_MAX]; /* 解析后的 Content-Type */
 } http_request_t;
 
 /* === HTTP 响应 === */
@@ -109,6 +115,13 @@ int http_format_response_header(char *buf, size_t buf_size, const http_response_
  * @return 方法字符串（如 "GET"）
  */
 const char *http_method_str(http_method_t method);
+
+/**
+ * http_request_free - 释放 HTTP 请求中动态分配的资源
+ *
+ * @param req 请求结构体
+ */
+void http_request_free(http_request_t *req);
 
 /**
  * http_mime_type - 根据文件扩展名获取 MIME 类型

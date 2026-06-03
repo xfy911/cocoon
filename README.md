@@ -21,6 +21,7 @@
 | 🔐 路径安全 | 自动防护路径遍历攻击 (`../`) |
 | 🛡️ 资源限制 | 空闲连接超时（默认 30s）+ 最大并发连接数限制 |
 | 📝 分级日志 | error / warn / info / debug 四级输出，命令行可调 |
+| 🌐 POST 回显 | 支持 JSON / form-urlencoded 请求体回显（API 测试） |
 | 🔧 极简配置 | 纯命令行启动，无需配置文件 |
 
 ## Quick Start
@@ -85,6 +86,12 @@ curl -I -H "If-None-Match: \"your-etag\"" http://localhost:8080/index.html
 
 # Gzip 压缩
 curl -I -H "Accept-Encoding: gzip" http://localhost:8080/index.html
+
+# POST JSON 回显
+curl -X POST -H "Content-Type: application/json" -d '{"hello":"world"}' http://localhost:8080/api/echo
+
+# POST 表单回显
+curl -X POST -H "Content-Type: application/x-www-form-urlencoded" -d 'name=cocoon' http://localhost:8080/api/echo
 ```
 
 ### 自动化测试
@@ -214,8 +221,7 @@ make bench
 - [x] Gzip 动态压缩
 - [x] 连接空闲超时 + 最大并发限制
 - [x] 分级日志系统
-- [ ] 完整的单元测试框架
-- [ ] 请求体解析（POST 支持）
+- [x] POST 请求体解析（JSON / form-urlencoded 回显）
 - [ ] HTTPS / TLS 支持
 - [ ] HTTP/2 多路复用
 - [ ] 配置文件支持（JSON / YAML）

@@ -206,7 +206,7 @@ static bool safe_path_join(char *dst, size_t dst_size,
  * @param len 数据长度
  * @return 0 成功，-1 失败
  */
-static int send_all(int fd, const char *buf, size_t len) {
+int send_all(int fd, const char *buf, size_t len) {
     size_t sent = 0;
     while (sent < len) {
         ssize_t n = write(fd, buf + sent, len - sent);

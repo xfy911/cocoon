@@ -1,0 +1,12 @@
+# Cocoon
+/build/
+*.o
+*.a
+*.so
+cocoon
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/

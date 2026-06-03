@@ -1,49 +1,86 @@
 # Cocoon
 
-一个基于 [coco](https://github.com/DefectingCat/coco) 协程库的轻量级静态资源 Web 服务器。
+> 一只从 **coco** 协程库中孵化出的轻量 Web 服务器。
 
 **Cocoon**（茧）—— 用协程的轻盈，包裹静态资源的安稳。
 
+[中文](#特性) | [Quick Start](#quick-start)
+
+---
+
 ## 特性
 
-- 🚀 **协程驱动并发** — 基于 coco 的有栈协程，每个连接一个协程，告别回调地狱
-- 📁 **静态文件托管** — 支持目录列表、MIME 类型自动识别、范围请求（Range）
-- 🧵 **多线程调度** — 利用 coco 的 M:N 调度器，自动扩展至多核
-- ⚡ **零拷贝发送** — 支持 sendfile，减少用户态/内核态拷贝
-- 🔧 **极简配置** — 命令行参数即可启动，无需配置文件
+| 特性 | 描述 |
+|------|------|
+| 🚀 协程驱动 | 基于 coco 有栈协程，每个连接一个协程，上下文切换 < 100ns |
+| 📁 静态托管 | 目录浏览、MIME 自动识别、Range 请求、index.html 自动补全 |
+| 🧵 多核扩展 | M:N 调度器 + Work-stealing，自动负载均衡至多核 |
+| ⚡ 零拷贝 | 优先使用 `sendfile`，减少用户态/内核态数据拷贝 |
+| 🔐 路径安全 | 自动防护路径遍历攻击 (`../`) |
+| 🔧 极简配置 | 纯命令行启动，无需配置文件 |
 
-## 快速开始
+## Quick Start
+
+### 依赖
+
+- GCC / Clang（C11 标准）
+- [coco](https://github.com/DefectingCat/coco) 协程库（已编译）
+- Linux（内核 ≥ 5.1，支持 io_uring）/ macOS
 
 ### 构建
 
 ```bash
-# 克隆仓库
 git clone https://github.com/xfy911/cocoon.git
 cd cocoon
 
-# 构建（需要 coco 库和头文件）
+# 默认使用 ../coco 作为 coco 库路径
 make
 
-# 运行
-./cocoon -r ./examples/www -p 8080
+# 或指定路径
+make COCO_INCLUDE=/path/to/coco/include COCO_LIB=/path/to/coco/build
 ```
 
-### 依赖
-
-- [coco](https://github.com/DefectingCat/coco) — 协程库
-- Linux / macOS（支持 epoll / kqueue）
-
-## 使用
+### 运行
 
 ```bash
-# 基本用法
-./cocoon -r /var/www/html -p 8080
+# 单线程模式（开发调试）
+./cocoon -r ./examples/www -p 8080
 
-# 多线程模式（自动检测 CPU 核心数）
+# 多线程模式（生产环境，自动检测 CPU 核心）
 ./cocoon -r ./examples/www -p 8080 -t
 
-# 指定工作线程数
-./cocoon -r ./examples/www -p 8080 -w 8
+# 指定 8 个工作线程
+./cocoon -r ./examples/www -p 8080 -t -w 8
+```
+
+### 测试
+
+```bash
+# 启动服务器
+./cocoon -r ./examples/www -p 8080 &
+
+# 访问首页
+curl http://localhost:8080/
+
+# 目录浏览
+curl http://localhost:8080/examples/
+
+# Range 请求
+curl -H "Range: bytes=0-99" http://localhost:8080/index.html
+```
+
+## 命令行参数
+
+```
+Usage: ./cocoon [options]
+
+Options:
+  -r <dir>    静态资源根目录（必填）
+  -p <port>   监听端口（默认 8080）
+  -t          启用多线程调度
+  -w <num>    工作线程数（默认自动检测 CPU 核心）
+  -v          详细日志输出
+  -h          显示帮助
 ```
 
 ## 架构
@@ -67,10 +104,77 @@ make
                      └─────────────────┘
 ```
 
+### 模块职责
+
+| 文件 | 职责 |
+|------|------|
+| `main.c` | 程序入口、信号处理、命令行参数解析 |
+| `server.c` | TCP 服务器生命周期：socket → bind → listen → accept → 协程分发 |
+| `http.c` | HTTP/1.1 请求解析、响应头格式化、MIME 类型推断 |
+| `static.c` | 静态文件服务（sendfile）、目录浏览 HTML 生成、错误响应 |
+| `cocoon.h` | 公共配置结构体与错误码定义 |
+
+## 核心 API 速览
+
+### HTTP 解析
+
+```c
+http_request_t req;
+int parsed = http_parse_request(buf, buf_len, &req);
+// req.method, req.path, req.content_length, req.keep_alive ...
+```
+
+### 响应格式化
+
+```c
+http_response_t resp = {
+    .status_code = 200,
+    .content_type = "text/html",
+    .content_length = file_size,
+    .keep_alive = true
+};
+int n = http_format_response_header(buf, sizeof(buf), &resp);
+```
+
+### 文件服务
+
+```c
+static_serve_file(fd, &req, "/var/www/html");
+static_serve_directory(fd, &req, "/var/www/html", real_path);
+static_send_error(fd, 404, true);
+```
+
+## 安全设计
+
+- **路径遍历防护**：自动过滤 `../`，拒绝超出根目录的访问
+- **目录隐藏**：不显示以 `.` 开头的隐藏文件
+- **HTML 转义**：目录列表中的文件名自动转义，防止 XSS
+- **请求方法过滤**：仅允许 `GET` / `HEAD`，拒绝其他方法
+
 ## 性能
 
-基于 coco 协程的高性能上下文切换（< 100ns），Cocoon 能够轻松处理数万并发连接。
+- 协程上下文切换：< 100ns（coco 基准）
+- 单线程可支撑数万并发连接
+- 多线程模式下 M:N 调度自动扩展至多核
+
+## 示例页面
+
+内置响应式示例首页，展示 Cocoon 三大特性：
+
+![Cocoon Demo](examples/www/index.html)
+
+> 渐变紫蓝背景 + 玻璃拟态卡片 + 移动端适配
+
+## 路线图
+
+- [ ] 支持 `ETag` / `Last-Modified` 缓存协商
+- [ ] Gzip / Brotli 动态压缩
+- [ ] HTTPS / TLS 支持
+- [ ] HTTP/2 多路复用
+- [ ] 配置文件支持（JSON / YAML）
 
 ## 许可证
 
-MIT
+MIT © xfy
+
+> 用 [coco](https://github.com/DefectingCat/coco) 孵化，为轻量而生。

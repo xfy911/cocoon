@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 
 /**
  * config.c - JSON 配置文件解析实现

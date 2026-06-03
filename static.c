@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 
 /**
  * static.c - 静态资源服务实现

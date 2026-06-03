@@ -1,7 +1,4 @@
-#define _GNU_SOURCE
-
 /**
- * server.c - 服务器核心实现
  *
  * 基于 coco 协程库实现高并发静态资源服务器。
  * 每个客户端连接由一个独立的协程处理，主线程负责 accept。
@@ -23,6 +20,7 @@
 #include "static.h"
 #include "cocoon.h"
 #include "log.h"
+#include "multipart.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -191,16 +189,90 @@ static int conn_read_body(connection_t *conn, http_request_t *req, size_t need) 
 /**
  * handle_post_request - 处理 POST 请求
  *
- * 目前仅提供 JSON 回显和表单回显，用于测试和 API 场景。
- * 支持 application/json 和 application/x-www-form-urlencoded。
+ * 支持 multipart/form-data 文件上传、JSON 回显和表单回显。
  *
  * @param fd 客户端 socket
  * @param req HTTP 请求
+ * @param root_dir 静态资源根目录（用于保存上传文件）
  * @return true 保持连接
  */
-static bool handle_post_request(int fd, const http_request_t *req) {
+static bool handle_post_request(int fd, const http_request_t *req, const char *root_dir) {
     char response[4096];
     int n = 0;
+
+    /* multipart/form-data 文件上传 */
+    if (strstr(req->content_type, "multipart/form-data") != NULL) {
+        char boundary[256];
+        if (!multipart_extract_boundary(req->content_type, boundary, sizeof(boundary))) {
+            static_send_error(fd, 400, req->keep_alive);
+            return req->keep_alive;
+        }
+
+        multipart_part_t *parts = NULL;
+        int num_parts = 0;
+        if (multipart_parse(req->body, req->body_len, boundary, &parts, &num_parts) != 0) {
+            static_send_error(fd, 400, req->keep_alive);
+            return req->keep_alive;
+        }
+
+        /* 构建 JSON 响应 */
+        n += snprintf(response + n, sizeof(response) - n,
+            "{\"method\":\"%s\",\"path\":\"%s\",\"uploaded\":%d,\"files\":[",
+            http_method_str(req->method), req->path, num_parts);
+
+        int files_saved = 0;
+        for (int i = 0; i < num_parts; i++) {
+            if (parts[i].filename && parts[i].filename[0] && parts[i].data_len > 0) {
+                /* 保存文件到 root_dir/uploads/ */
+                char upload_dir[4096];
+                int r = snprintf(upload_dir, sizeof(upload_dir), "%s/uploads", root_dir);
+                if (r > 0 && r < (int)sizeof(upload_dir)) {
+                    /* 创建目录（忽略已存在错误） */
+                    mkdir(upload_dir, 0755);
+
+                    char file_path[4096];
+                    r = snprintf(file_path, sizeof(file_path), "%s/%s", upload_dir, parts[i].filename);
+                    if (r > 0 && r < (int)sizeof(file_path)) {
+                        FILE *fp = fopen(file_path, "wb");
+                        if (fp) {
+                            fwrite(parts[i].data, 1, parts[i].data_len, fp);
+                            fclose(fp);
+                            files_saved++;
+
+                            if (files_saved > 1) {
+                                n += snprintf(response + n, sizeof(response) - n, ",");
+                            }
+                            n += snprintf(response + n, sizeof(response) - n,
+                                "{\"field\":\"%s\",\"filename\":\"%s\",\"size\":%zu,\"path\":\"%s\"}",
+                                parts[i].name ? parts[i].name : "",
+                                parts[i].filename,
+                                parts[i].data_len,
+                                file_path);
+                        }
+                    }
+                }
+            }
+        }
+
+        n += snprintf(response + n, sizeof(response) - n, "]}");
+
+        multipart_parts_free(parts, num_parts);
+
+        char header[512];
+        int header_len = snprintf(header, sizeof(header),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: %d\r\n"
+            "Connection: %s\r\n"
+            "Server: Cocoon/1.0\r\n"
+            "\r\n",
+            n, req->keep_alive ? "keep-alive" : "close");
+
+        send_all(fd, header, (size_t)header_len);
+        send_all(fd, response, (size_t)n);
+
+        return req->keep_alive;
+    }
 
     n += snprintf(response + n, sizeof(response) - n,
         "{\"method\":\"%s\",\"path\":\"%s\",\"content_type\":\"%s\",\"body_length\":%zu",
@@ -291,7 +363,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
 
     /* 处理 POST */
     if (req.method == HTTP_POST) {
-        bool keep = handle_post_request(conn->fd, &req);
+        bool keep = handle_post_request(conn->fd, &req, conn->root_dir);
         http_request_free(&req);
         return keep;
     }

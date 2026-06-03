@@ -7,7 +7,7 @@ COCO_LIB     ?= $(COCO_DIR)/build
 
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -std=c11 -I$(COCO_INCLUDE)
-LDFLAGS = -L$(COCO_LIB) -lcoco -lpthread -lm -luring
+LDFLAGS = -L$(COCO_LIB) -lcoco -lpthread -lm -luring -lz
 
 # 调试模式
 DEBUG ?= 0

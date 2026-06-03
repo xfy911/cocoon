@@ -76,6 +76,9 @@ typedef struct {
     /* 缓存 */
     const char *etag;
     const char *last_modified;
+    
+    /* 压缩 */
+    const char *content_encoding;
 } http_response_t;
 
 /* === API === */

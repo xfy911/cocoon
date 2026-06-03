@@ -130,7 +130,7 @@ static void parse_headers(const char **p, const char *end, http_request_t *req) 
                     const char *val = req->headers[req->num_headers].value;
                     if (strstr(val, "gzip") != NULL) req->accept_gzip = true;
                     if (strstr(val, "deflate") != NULL) req->accept_deflate = true;
-                    /* 解析 Range: bytes=start-end */
+                } else if (strcmp(req->headers[req->num_headers].name, "range") == 0) {
                     const char *range_val = req->headers[req->num_headers].value;
                     if (strncasecmp(range_val, "bytes=", 6) == 0) {
                         req->has_range = true;
@@ -256,6 +256,9 @@ int http_format_response_header(char *buf, size_t buf_size, const http_response_
     }
     if (resp->last_modified && resp->last_modified[0]) {
         n += snprintf(buf + n, buf_size - n, "Last-Modified: %s\r\n", resp->last_modified);
+    }
+    if (resp->content_encoding && resp->content_encoding[0]) {
+        n += snprintf(buf + n, buf_size - n, "Content-Encoding: %s\r\n", resp->content_encoding);
     }
 
     /* 连接头 + 空行 */

@@ -21,6 +21,68 @@
 #include <time.h>
 #include <dirent.h>
 #include <errno.h>
+#include <zlib.h>
+
+/**
+ * is_compressible_mime - 判断 MIME 类型是否适合压缩
+ *
+ * 文本类型通常有很高的压缩率，二进制类型（图片、视频、音频）
+ * 本身已经压缩过，再压缩浪费时间且效果差。
+ *
+ * @param mime_type MIME 类型字符串
+ * @return true 适合压缩
+ */
+static bool is_compressible_mime(const char *mime_type) {
+    if (!mime_type) return false;
+    return (
+        strstr(mime_type, "text/") != NULL ||
+        strstr(mime_type, "application/javascript") != NULL ||
+        strstr(mime_type, "application/json") != NULL ||
+        strstr(mime_type, "application/xml") != NULL ||
+        strstr(mime_type, "application/manifest") != NULL ||
+        strstr(mime_type, "image/svg") != NULL
+    );
+}
+
+/**
+ * gzip_compress - 使用 zlib 压缩数据为 gzip 格式
+ *
+ * 使用 deflateInit2 的 windowBits = 15 + 16 来生成标准 gzip 头。
+ *
+ * @param src 原始数据
+ * @param src_len 原始数据长度
+ * @param dst 输出缓冲区（调用者分配，建议大小为 src_len）
+ * @param dst_cap 输出缓冲区容量
+ * @return 压缩后长度，0 表示不需要压缩（压缩后更大），-1 表示错误
+ */
+static ssize_t gzip_compress(const char *src, size_t src_len,
+                             char *dst, size_t dst_cap) {
+    z_stream strm = {0};
+    /* 15 + 16 = gzip 格式 */
+    if (deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
+                     15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        return -1;
+    }
+
+    strm.avail_in = (uInt)src_len;
+    strm.next_in = (Bytef *)src;
+    strm.avail_out = (uInt)dst_cap;
+    strm.next_out = (Bytef *)dst;
+
+    if (deflate(&strm, Z_FINISH) != Z_STREAM_END) {
+        deflateEnd(&strm);
+        return -1;
+    }
+
+    size_t compressed_len = dst_cap - strm.avail_out;
+    deflateEnd(&strm);
+
+    /* 如果压缩后更大或差不多，就不压缩了 */
+    if (compressed_len >= src_len * 0.95) {
+        return 0;
+    }
+    return (ssize_t)compressed_len;
+}
 
 /**
  * format_http_time - 将时间戳格式化为 HTTP 日期字符串
@@ -278,25 +340,57 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir) {
         }
     }
 
-    /* 计算发送范围 */
+    /* 判断是否 gzip 压缩 */
     int64_t file_size = st.st_size;
+    bool use_gzip = false;
+    char *gzip_buf = NULL;
+    ssize_t gzip_len = 0;
+
+    if (req->accept_gzip && !req->has_range && req->method != HTTP_HEAD) {
+        const char *mime = http_mime_type(real_path);
+        if (is_compressible_mime(mime) && file_size > 256) {
+            /* 读取文件内容到内存 */
+            char *file_buf = (char *)malloc((size_t)file_size);
+            if (file_buf) {
+                ssize_t read_total = 0;
+                while (read_total < file_size) {
+                    ssize_t n = read(file_fd, file_buf + read_total, (size_t)(file_size - read_total));
+                    if (n <= 0) break;
+                    read_total += n;
+                }
+                if (read_total == file_size) {
+                    gzip_buf = (char *)malloc((size_t)file_size);
+                    if (gzip_buf) {
+                        gzip_len = gzip_compress(file_buf, (size_t)file_size, gzip_buf, (size_t)file_size);
+                        if (gzip_len > 0) {
+                            use_gzip = true;
+                        }
+                    }
+                }
+                free(file_buf);
+            }
+        }
+    }
+
+    /* 计算发送范围 */
     int64_t send_start = 0;
     int64_t send_end = file_size - 1;
     int status_code = 200;
 
-    if (req->has_range) {
+    if (!use_gzip && req->has_range) {
         send_start = req->range_start;
         if (req->range_end >= 0 && req->range_end < file_size) {
             send_end = req->range_end;
         }
         if (send_start >= file_size || send_start > send_end) {
             close(file_fd);
+            free(gzip_buf);
             return static_send_error(fd, 416, req->keep_alive);
         }
         status_code = 206;
     }
 
-    int64_t send_length = send_end - send_start + 1;
+    int64_t send_length = use_gzip ? gzip_len : (send_end - send_start + 1);
 
     /* 构建响应头 */
     http_response_t resp = {
@@ -305,24 +399,27 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir) {
         .content_type = http_mime_type(real_path),
         .content_length = send_length,
         .keep_alive = req->keep_alive,
-        .has_range = req->has_range,
+        .has_range = !use_gzip && req->has_range,
         .range_start = send_start,
         .range_end = send_end,
         .total_length = file_size,
         .etag = etag,
-        .last_modified = last_modified
+        .last_modified = last_modified,
+        .content_encoding = use_gzip ? "gzip" : NULL
     };
 
     char header_buf[1024];
     int header_len = http_format_response_header(header_buf, sizeof(header_buf), &resp);
     if (header_len < 0) {
         close(file_fd);
+        free(gzip_buf);
         return static_send_error(fd, 500, req->keep_alive);
     }
 
     /* 发送响应头 */
     if (send_all(fd, header_buf, (size_t)header_len) != 0) {
         close(file_fd);
+        free(gzip_buf);
         return COCOON_ERROR;
     }
 
@@ -330,29 +427,37 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir) {
     if (req->method == HTTP_HEAD) {
         /* HEAD 请求不发送 body */
         close(file_fd);
+        free(gzip_buf);
         return COCOON_OK;
     }
 
-    /* 定位到起始位置 */
-    if (send_start > 0) {
-        lseek(file_fd, send_start, SEEK_SET);
-    }
-
-    /* 使用 sendfile 零拷贝发送 */
-    off_t offset = send_start;
-    ssize_t remaining = send_length;
-    while (remaining > 0) {
-        ssize_t n = sendfile(fd, file_fd, &offset, (size_t)remaining);
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EINTR) continue;
-            /* sendfile 失败，回退到 read/write */
-            break;
+    if (use_gzip) {
+        /* 发送 gzip 压缩后的数据 */
+        send_all(fd, gzip_buf, (size_t)gzip_len);
+        free(gzip_buf);
+        close(file_fd);
+    } else {
+        /* 定位到起始位置 */
+        if (send_start > 0) {
+            lseek(file_fd, send_start, SEEK_SET);
         }
-        if (n == 0) break;
-        remaining -= n;
-    }
 
-    close(file_fd);
+        /* 使用 sendfile 零拷贝发送 */
+        off_t offset = send_start;
+        ssize_t remaining = send_length;
+        while (remaining > 0) {
+            ssize_t n = sendfile(fd, file_fd, &offset, (size_t)remaining);
+            if (n < 0) {
+                if (errno == EAGAIN || errno == EINTR) continue;
+                /* sendfile 失败，回退到 read/write */
+                break;
+            }
+            if (n == 0) break;
+            remaining -= n;
+        }
+
+        close(file_fd);
+    }
     return COCOON_OK;
 }
 

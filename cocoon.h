@@ -1,0 +1,69 @@
+/**
+ * cocoon.h - Cocoon 公共头文件
+ *
+ * 定义错误码、配置结构体、函数声明。
+ *
+ * @author xfy
+ */
+
+#ifndef COCOON_H
+#define COCOON_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+
+/* === 错误码 === */
+#define COCOON_OK           0   /**< 成功 */
+#define COCOON_ERROR       -1   /**< 通用错误 */
+#define COCOON_NOMEM       -2   /**< 内存不足 */
+#define COCOON_NOTFOUND    -3   /**< 文件未找到 */
+#define COCOONForbidden    -4   /**< 禁止访问 */
+#define COCOON_BADREQUEST  -5   /**< 请求格式错误 */
+
+/* === 服务器配置 === */
+/**
+ * cocoon_config - 服务器配置结构体
+ *
+ * 命令行参数解析后的配置。
+ */
+typedef struct cocoon_config {
+    const char *root_dir;       /**< 静态资源根目录 */
+    uint16_t    port;           /**< 监听端口 */
+    bool        threaded;       /**< 是否启用多线程调度 */
+    uint32_t    num_workers;    /**< 工作线程数（0 = 自动检测） */
+    bool        verbose;        /**< 详细日志输出 */
+} cocoon_config_t;
+
+/* === 服务器生命周期 API === */
+/**
+ * cocoon_server_create - 创建服务器实例
+ *
+ * @param config 配置指针
+ * @return 服务器句柄，失败返回 NULL
+ */
+void *cocoon_server_create(const cocoon_config_t *config);
+
+/**
+ * cocoon_server_run - 启动服务器（阻塞）
+ *
+ * @param server 服务器句柄
+ * @return COCOON_OK 成功，负值错误码
+ */
+int cocoon_server_run(void *server);
+
+/**
+ * cocoon_server_stop - 优雅关闭服务器
+ *
+ * @param server 服务器句柄
+ */
+void cocoon_server_stop(void *server);
+
+/**
+ * cocoon_server_destroy - 销毁服务器实例
+ *
+ * @param server 服务器句柄
+ */
+void cocoon_server_destroy(void *server);
+
+#endif /* COCOON_H */

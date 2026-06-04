@@ -19,9 +19,62 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <zlib.h>
+#include <brotli/encode.h>
 
 /* 最大 HTTP/2 会话数 */
 #define MAX_HTTP2_SESSIONS 1024
+
+/* 压缩辅助函数（与 static.c 独立，保持模块边界） */
+static bool is_compressible_mime(const char *mime_type) {
+    if (!mime_type) return false;
+    return (
+        strstr(mime_type, "text/") != NULL ||
+        strstr(mime_type, "application/javascript") != NULL ||
+        strstr(mime_type, "application/json") != NULL ||
+        strstr(mime_type, "application/xml") != NULL ||
+        strstr(mime_type, "application/manifest") != NULL ||
+        strstr(mime_type, "image/svg") != NULL
+    );
+}
+
+static ssize_t gzip_compress(const char *src, size_t src_len,
+                             char *dst, size_t dst_cap) {
+    z_stream strm = {0};
+    if (deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
+                     15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        return -1;
+    }
+    strm.avail_in = (uInt)src_len;
+    strm.next_in = (Bytef *)src;
+    strm.avail_out = (uInt)dst_cap;
+    strm.next_out = (Bytef *)dst;
+    if (deflate(&strm, Z_FINISH) != Z_STREAM_END) {
+        deflateEnd(&strm);
+        return -1;
+    }
+    size_t compressed_len = dst_cap - strm.avail_out;
+    deflateEnd(&strm);
+    if (compressed_len >= src_len * 0.95) return 0;
+    return (ssize_t)compressed_len;
+}
+
+static ssize_t brotli_compress(const char *src, size_t src_len,
+                                 char *dst, size_t dst_cap) {
+    size_t encoded_size = dst_cap;
+    BROTLI_BOOL ok = BrotliEncoderCompress(
+        BROTLI_DEFAULT_QUALITY,
+        BROTLI_DEFAULT_WINDOW,
+        BROTLI_MODE_GENERIC,
+        src_len,
+        (const uint8_t *)src,
+        &encoded_size,
+        (uint8_t *)dst
+    );
+    if (!ok) return -1;
+    if (encoded_size >= src_len * 0.95) return 0;
+    return (ssize_t)encoded_size;
+}
 
 static http2_session_t *g_sessions[MAX_HTTP2_SESSIONS];
 static int g_session_count = 0;
@@ -463,19 +516,26 @@ static ssize_t http2_data_source_read_callback(
     nghttp2_data_source *source,
     void *user_data __attribute__((unused))) {
     
-    if (source->fd < 0) {
+    http2_stream_data_t *stream = (http2_stream_data_t *)source->ptr;
+    if (!stream || !stream->response_body) {
         *data_flags |= NGHTTP2_DATA_FLAG_EOF;
         return 0;
     }
     
-    ssize_t n = read(source->fd, buf, length);
-    if (n < 0) {
-        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+    size_t remaining = stream->response_len - stream->response_sent;
+    if (remaining == 0) {
+        *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+        return 0;
     }
-    if (n == 0) {
+    
+    size_t to_send = length < remaining ? length : remaining;
+    memcpy(buf, stream->response_body + stream->response_sent, to_send);
+    stream->response_sent += to_send;
+    
+    if (stream->response_sent >= stream->response_len) {
         *data_flags |= NGHTTP2_DATA_FLAG_EOF;
     }
-    return (ssize_t)n;
+    return (ssize_t)to_send;
 }
 
 static void http2_serve_static(http2_session_t *h2, http2_stream_data_t *stream) {
@@ -593,6 +653,72 @@ static void http2_serve_static(http2_session_t *h2, http2_stream_data_t *stream)
         return;
     }
     
+    /* 读取文件内容到内存 */
+    int64_t file_size = st.st_size;
+    char *file_buf = (char *)malloc((size_t)file_size);
+    if (!file_buf) {
+        close(file_fd);
+        nghttp2_nv hdrs[] = {
+            {(uint8_t *)":status", (uint8_t *)"500", 7, 3, 0}};
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+        return;
+    }
+    
+    ssize_t read_total = 0;
+    while (read_total < file_size) {
+        ssize_t n = read(file_fd, file_buf + read_total, (size_t)(file_size - read_total));
+        if (n <= 0) break;
+        read_total += n;
+    }
+    close(file_fd);
+    
+    if (read_total != file_size) {
+        free(file_buf);
+        nghttp2_nv hdrs[] = {
+            {(uint8_t *)":status", (uint8_t *)"500", 7, 3, 0}};
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+        return;
+    }
+    
+    /* 判断是否需要压缩 */
+    bool use_gzip = false;
+    bool use_brotli = false;
+    const char *mime = http_mime_type(real_path);
+    
+    if (stream->request.method != HTTP_HEAD && is_compressible_mime(mime) && file_size > 256) {
+        char *compress_buf = (char *)malloc((size_t)file_size);
+        if (compress_buf) {
+            if (h2->brotli_enabled) {
+                ssize_t cl = brotli_compress(file_buf, (size_t)file_size, compress_buf, (size_t)file_size);
+                if (cl > 0) {
+                    free(file_buf);
+                    file_buf = compress_buf;
+                    file_size = cl;
+                    use_brotli = true;
+                } else {
+                    free(compress_buf);
+                }
+            } else if (h2->gzip_enabled) {
+                ssize_t cl = gzip_compress(file_buf, (size_t)file_size, compress_buf, (size_t)file_size);
+                if (cl > 0) {
+                    free(file_buf);
+                    file_buf = compress_buf;
+                    file_size = cl;
+                    use_gzip = true;
+                } else {
+                    free(compress_buf);
+                }
+            } else {
+                free(compress_buf);
+            }
+        }
+    }
+    
+    /* 存储到流 */
+    stream->response_body = file_buf;
+    stream->response_len = (size_t)file_size;
+    stream->response_sent = 0;
+    
     /* 构建响应头 */
     nghttp2_nv hdrs[16];
     int num_hdrs = 0;
@@ -600,14 +726,21 @@ static void http2_serve_static(http2_session_t *h2, http2_stream_data_t *stream)
     hdrs[num_hdrs++] = (nghttp2_nv){
         (uint8_t *)":status", (uint8_t *)"200", 7, 3, 0};
     
-    const char *mime = http_mime_type(real_path);
     hdrs[num_hdrs++] = (nghttp2_nv){
         (uint8_t *)"content-type", (uint8_t *)mime, 12, strlen(mime), 0};
     
     char content_length_str[32];
-    snprintf(content_length_str, sizeof(content_length_str), "%ld", (long)st.st_size);
+    snprintf(content_length_str, sizeof(content_length_str), "%ld", (long)file_size);
     hdrs[num_hdrs++] = (nghttp2_nv){
         (uint8_t *)"content-length", (uint8_t *)content_length_str, 14, strlen(content_length_str), 0};
+    
+    if (use_brotli) {
+        hdrs[num_hdrs++] = (nghttp2_nv){
+            (uint8_t *)"content-encoding", (uint8_t *)"br", 16, 2, 0};
+    } else if (use_gzip) {
+        hdrs[num_hdrs++] = (nghttp2_nv){
+            (uint8_t *)"content-encoding", (uint8_t *)"gzip", 16, 4, 0};
+    }
     
     hdrs[num_hdrs++] = (nghttp2_nv){
         (uint8_t *)"etag", (uint8_t *)etag, 4, strlen(etag), 0};
@@ -620,14 +753,15 @@ static void http2_serve_static(http2_session_t *h2, http2_stream_data_t *stream)
     
     /* HEAD 请求：不发送 body */
     if (stream->request.method == HTTP_HEAD) {
-        close(file_fd);
+        free(stream->response_body);
+        stream->response_body = NULL;
+        stream->response_len = 0;
         nghttp2_submit_response(h2->session, stream->stream_id, hdrs, num_hdrs, NULL);
     } else {
         nghttp2_data_provider provider;
-        provider.source.fd = file_fd;
+        provider.source.ptr = stream;
         provider.read_callback = http2_data_source_read_callback;
         nghttp2_submit_response(h2->session, stream->stream_id, hdrs, num_hdrs, &provider);
-        stream->file_fd = file_fd;
     }
 }
 

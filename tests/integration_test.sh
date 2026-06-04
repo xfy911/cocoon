@@ -147,7 +147,7 @@ assert_body_contains() {
     local expect="$2"
     local desc="${3:-$url}"
     local body
-    body=$(curl -s -k "$url")
+    body=$(curl -s -k --compressed "$url")
     if echo "$body" | grep -q "$expect"; then
         echo "  ✓ $desc — 响应体包含 '$expect'"
         pass
@@ -312,6 +312,48 @@ assert_post_form() {
         pass
     else
         echo "  ✗ $desc — 响应期望包含 '$expect', 实际: $resp"
+        fail
+    fi
+}
+
+assert_http2_brotli() {
+    local url="$1"
+    local desc="${2:-$url}"
+    local encoding
+    encoding=$(curl --http2 -k -s -D - -o /dev/null "$url" | grep -i "Content-Encoding:" | tr -d '\r' || true)
+    if echo "$encoding" | grep -qi "br"; then
+        echo "  ✓ $desc — HTTP/2 返回 brotli 压缩"
+        pass
+    else
+        echo "  ✗ $desc — HTTP/2 期望 brotli 压缩, 实际: $encoding"
+        fail
+    fi
+}
+
+assert_http2_gzip() {
+    local url="$1"
+    local desc="${2:-$url}"
+    local encoding
+    encoding=$(curl --http2 -k -s -D - -o /dev/null "$url" | grep -i "Content-Encoding:" | tr -d '\r' || true)
+    if echo "$encoding" | grep -qi "gzip"; then
+        echo "  ✓ $desc — HTTP/2 返回 gzip 压缩"
+        pass
+    else
+        echo "  ✗ $desc — HTTP/2 期望 gzip 压缩, 实际: $encoding"
+        fail
+    fi
+}
+
+assert_http2_not_compressed() {
+    local url="$1"
+    local desc="${2:-$url}"
+    local encoding
+    encoding=$(curl --http2 -k -s -D - -o /dev/null "$url" | grep -i "Content-Encoding:" | tr -d '\r' || true)
+    if [[ -z "$encoding" ]]; then
+        echo "  ✓ $desc — HTTP/2 无压缩"
+        pass
+    else
+        echo "  ✗ $desc — HTTP/2 期望无压缩, 实际: $encoding"
         fail
     fi
 }
@@ -484,7 +526,7 @@ else
 fi
 
 # HTTP/2 响应体
-h2_body=$(curl --http2 -k -s "https://$HOST/")
+h2_body=$(curl --http2 -k -s --compressed "https://$HOST/")
 if echo "$h2_body" | grep -q "Cocoon"; then
     echo "  ✓ HTTP/2 响应体 — 包含 'Cocoon'"
     pass
@@ -525,6 +567,12 @@ if [[ -n "$H2_ETAG" ]]; then
         fail
     fi
 fi
+
+# HTTP/2 压缩测试
+assert_http2_brotli "https://$HOST/index.html" "HTTP/2 HTML brotli"
+assert_http2_brotli "https://$HOST/style.css" "HTTP/2 CSS brotli"
+assert_http2_brotli "https://$HOST/app.js" "HTTP/2 JS brotli"
+assert_http2_not_compressed "https://$HOST/image.png" "HTTP/2 图片不压缩"
 
 # 停止 HTTP/2 服务器，恢复 HTTP 服务器
 kill_server

@@ -9,10 +9,10 @@
 #include "cocoon.h"
 #include "server.h"
 #include "config.h"
+#include "platform.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <signal.h>
 
 /**
  * g_ctx - 全局服务器上下文（用于信号处理）
@@ -184,9 +184,14 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    /* 初始化 socket 子系统（Windows 下 WSAStartup） */
+    if (cocoon_socket_init() != 0) {
+        fprintf(stderr, "[Cocoon] socket 子系统初始化失败\n");
+        return 1;
+    }
+
     /* 注册信号处理 */
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
+    cocoon_signal_setup(signal_handler);
 
     /* 设置日志级别 */
     log_set_level(config.log_level);
@@ -204,6 +209,9 @@ int main(int argc, char *argv[]) {
     /* 清理 */
     server_destroy(g_ctx);
     g_ctx = NULL;
+
+    /* 释放 socket 子系统（Windows 下 WSACleanup） */
+    cocoon_socket_cleanup();
 
     /* 释放配置文件分配的 root_dir */
     if (config.root_dir) {

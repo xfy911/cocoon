@@ -20,9 +20,17 @@ PREFIX ?= /usr/local
 BINDIR = $(PREFIX)/bin
 
 # 源文件
-SRCS = main.c server.c http.c static.c log.c config.c multipart.c
+SRCS = main.c server.c http.c static.c log.c config.c multipart.c platform.c
 OBJS = $(SRCS:.c=.o)
 TARGET = cocoon
+
+# 链接参数
+LDFLAGS = -L$(COCO_LIB) -lcoco -lpthread -lm -luring -lz -lbrotlienc
+
+# Windows (MinGW) 下链接 Winsock 库
+ifeq ($(OS),Windows_NT)
+    LDFLAGS += -lws2_32
+endif
 
 # 单元测试
 UNITY_SRC = tests/unity/unity.c
@@ -78,8 +86,8 @@ unit-test: $(UNIT_TEST_BINS)
 	fi
 
 # 单元测试编译规则
-$(UNIT_TEST_DIR)/test_server: $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c $(UNITY_SRC)
-	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c $(UNITY_SRC) $(LDFLAGS)
+$(UNIT_TEST_DIR)/test_server: $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c platform.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c platform.c $(UNITY_SRC) $(LDFLAGS)
 
 $(UNIT_TEST_DIR)/test_multipart: $(UNIT_TEST_DIR)/test_multipart.c multipart.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_multipart.c multipart.c $(UNITY_SRC) -lm

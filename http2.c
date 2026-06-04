@@ -27,6 +27,15 @@
 #define MAX_HTTP2_SESSIONS 1024
 
 /* 压缩辅助函数（与 static.c 独立，保持模块边界） */
+/**
+ * is_compressible_mime - 判断 MIME 类型是否可压缩
+ *
+ * 检查给定 MIME 类型是否为文本类或可压缩格式。
+ * 用于决定是否对响应内容应用 gzip/brotli 压缩。
+ *
+ * @param mime_type MIME 类型字符串
+ * @return true 可压缩，false 不可压缩
+ */
 static bool is_compressible_mime(const char *mime_type) {
     if (!mime_type) return false;
     return (
@@ -39,6 +48,18 @@ static bool is_compressible_mime(const char *mime_type) {
     );
 }
 
+/**
+ * gzip_compress - gzip 压缩数据
+ *
+ * 使用 zlib 对输入数据进行 gzip 压缩。
+ * 如果压缩后大小未明显减小（< 95%），返回 0 表示不压缩更优。
+ *
+ * @param src 原始数据
+ * @param src_len 原始数据长度
+ * @param dst 输出缓冲区
+ * @param dst_cap 输出缓冲区容量
+ * @return 压缩后长度，0 表示未压缩更优，-1 失败
+ */
 static ssize_t gzip_compress(const char *src, size_t src_len,
                              char *dst, size_t dst_cap) {
     z_stream strm = {0};
@@ -60,6 +81,18 @@ static ssize_t gzip_compress(const char *src, size_t src_len,
     return (ssize_t)compressed_len;
 }
 
+/**
+ * brotli_compress - Brotli 压缩数据
+ *
+ * 使用 Brotli 编码器对输入数据进行压缩。
+ * 通常比 gzip 压缩率更高，CPU 消耗也更大。
+ *
+ * @param src 原始数据
+ * @param src_len 原始数据长度
+ * @param dst 输出缓冲区
+ * @param dst_cap 输出缓冲区容量
+ * @return 压缩后长度，0 表示未压缩更优，-1 失败
+ */
 static ssize_t brotli_compress(const char *src, size_t src_len,
                                  char *dst, size_t dst_cap) {
     size_t encoded_size = dst_cap;
@@ -115,12 +148,25 @@ static void http2_serve_static(http2_session_t *h2, http2_stream_data_t *stream)
 
 /* ===================== 会话管理 ===================== */
 
+/**
+ * http2_init - 初始化 HTTP/2 模块
+ *
+ * 清空会话数组，准备接受新连接。
+ *
+ * @return 0 成功
+ */
 int http2_init(void) {
     memset(g_sessions, 0, sizeof(g_sessions));
     g_session_count = 0;
     return 0;
 }
 
+/**
+ * http2_cleanup - 清理所有 HTTP/2 会话
+ *
+ * 遍历会话数组，销毁所有存在的会话。
+ * 通常在服务器关闭时调用。
+ */
 void http2_cleanup(void) {
     for (int i = 0; i < MAX_HTTP2_SESSIONS; i++) {
         if (g_sessions[i]) {
@@ -131,6 +177,16 @@ void http2_cleanup(void) {
     g_session_count = 0;
 }
 
+/**
+ * http2_session_create - 创建 HTTP/2 会话
+ *
+ * 为指定 fd 创建 nghttp2 会话，注册回调函数，发送 SETTINGS 帧。
+ * 如果该 fd 已存在会话，先销毁旧会话。
+ *
+ * @param fd 客户端 socket
+ * @param tls_mode 是否为 TLS 模式
+ * @return 新会话指针，NULL 失败
+ */
 http2_session_t *http2_session_create(int fd, bool tls_mode) {
     if (fd < 0 || fd >= MAX_HTTP2_SESSIONS) {
         return NULL;
@@ -192,6 +248,13 @@ http2_session_t *http2_session_create(int fd, bool tls_mode) {
     return h2;
 }
 
+/**
+ * http2_session_destroy - 销毁 HTTP/2 会话
+ *
+ * 从全局数组移除，释放 nghttp2 会话，关闭所有关联流。
+ *
+ * @param h2 会话指针
+ */
 void http2_session_destroy(http2_session_t *h2) {
     if (!h2) return;
 
@@ -220,16 +283,38 @@ void http2_session_destroy(http2_session_t *h2) {
     free(h2);
 }
 
+/**
+ * http2_session_is_http2 - 检查 fd 是否已升级为 HTTP/2
+ *
+ * @param fd 客户端 socket
+ * @return true 是 HTTP/2 连接
+ */
 bool http2_session_is_http2(int fd) {
     if (fd < 0 || fd >= MAX_HTTP2_SESSIONS) return false;
     return g_sessions[fd] != NULL;
 }
 
+/**
+ * http2_session_get - 获取 fd 对应的 HTTP/2 会话
+ *
+ * @param fd 客户端 socket
+ * @return 会话指针，NULL 不存在
+ */
 http2_session_t *http2_session_get(int fd) {
     if (fd < 0 || fd >= MAX_HTTP2_SESSIONS) return NULL;
     return g_sessions[fd];
 }
 
+/**
+ * http2_session_set_context - 设置会话的服务上下文
+ *
+ * 传入 root_dir 和压缩配置，供后续静态文件服务使用。
+ *
+ * @param h2 会话指针
+ * @param root_dir 静态资源根目录
+ * @param gzip_enabled 是否启用 gzip
+ * @param brotli_enabled 是否启用 brotli
+ */
 void http2_session_set_context(http2_session_t *h2, const char *root_dir, bool gzip_enabled, bool brotli_enabled) {
     if (!h2) return;
     h2->root_dir = root_dir;
@@ -237,6 +322,16 @@ void http2_session_set_context(http2_session_t *h2, const char *root_dir, bool g
     h2->brotli_enabled = brotli_enabled;
 }
 
+/**
+ * http2_session_upgrade - 将 HTTP/1.1 连接升级为 HTTP/2
+ *
+ * 通过 nghttp2_session_upgrade2 注册 stream 1，处理已解析的 HTTP/1.1 请求。
+ * 用于 h2c 升级（Upgrade: h2c）场景。
+ *
+ * @param h2 会话指针
+ * @param req HTTP/1.1 请求（已解析）
+ * @return 0 成功，-1 失败
+ */
 int http2_session_upgrade(http2_session_t *h2, const http_request_t *req) {
     if (!h2 || !h2->session || !req) return -1;
 
@@ -270,6 +365,16 @@ int http2_session_upgrade(http2_session_t *h2, const http_request_t *req) {
 
 /* ===================== 数据收发 ===================== */
 
+/**
+ * http2_recv - 接收 HTTP/2 帧数据
+ *
+ * 将数据喂给 nghttp2 解析器，并发送任何挂起的输出帧。
+ *
+ * @param h2 会话指针
+ * @param buf 输入数据
+ * @param len 数据长度
+ * @return 0 成功，-1 失败
+ */
 int http2_recv(http2_session_t *h2, const uint8_t *buf, size_t len) {
     if (!h2 || !h2->session) return -1;
 
@@ -283,6 +388,14 @@ int http2_recv(http2_session_t *h2, const uint8_t *buf, size_t len) {
     return http2_send_pending(h2);
 }
 
+/**
+ * http2_send_pending - 发送挂起的 HTTP/2 输出帧
+ *
+ * 调用 nghttp2_session_send 处理所有待发送的帧。
+ *
+ * @param h2 会话指针
+ * @return 0 成功，-1 失败
+ */
 int http2_send_pending(http2_session_t *h2) {
     if (!h2 || !h2->session) return -1;
 
@@ -294,11 +407,23 @@ int http2_send_pending(http2_session_t *h2) {
     return 0;
 }
 
+/**
+ * http2_want_read - 检查会话是否还需要读取数据
+ *
+ * @param h2 会话指针
+ * @return true 需要读取
+ */
 bool http2_want_read(http2_session_t *h2) {
     if (!h2 || !h2->session) return false;
     return nghttp2_session_want_read(h2->session) != 0;
 }
 
+/**
+ * http2_want_write - 检查会话是否还需要写入数据
+ *
+ * @param h2 会话指针
+ * @return true 需要写入
+ */
 bool http2_want_write(http2_session_t *h2) {
     if (!h2 || !h2->session) return false;
     return nghttp2_session_want_write(h2->session) != 0;
@@ -306,6 +431,19 @@ bool http2_want_write(http2_session_t *h2) {
 
 /* ===================== nghttp2 回调 ===================== */
 
+/**
+ * send_callback - nghttp2 发送回调
+ *
+ * 将 nghttp2 生成的帧数据通过 TLS 或原始 socket 发送。
+ * 这是 nghttp2 与 cocoon I/O 层之间的桥接。
+ *
+ * @param session nghttp2 会话（未使用）
+ * @param data 待发送数据
+ * @param length 数据长度
+ * @param flags 标志（未使用）
+ * @param user_data 用户数据（http2_session_t）
+ * @return 发送字节数，或 NGHTTP2_ERR_CALLBACK_FAILURE
+ */
 static ssize_t send_callback(nghttp2_session *session __attribute__((unused)),
                              const uint8_t *data, size_t length,
                              int flags __attribute__((unused)),
@@ -329,6 +467,17 @@ static ssize_t send_callback(nghttp2_session *session __attribute__((unused)),
     return (int)sent;
 }
 
+/**
+ * on_begin_headers_callback - 新流开始时创建流数据
+ *
+ * 当 nghttp2 开始接收 HEADERS 帧时创建 http2_stream_data_t，
+ * 插入会话链表并关联到 nghttp2 流。
+ *
+ * @param session nghttp2 会话
+ * @param frame 当前帧
+ * @param user_data 会话指针
+ * @return 0 成功，NGHTTP2_ERR_CALLBACK_FAILURE 失败
+ */
 static int on_begin_headers_callback(nghttp2_session *session __attribute__((unused)),
                                      const nghttp2_frame *frame,
                                      void *user_data) {
@@ -358,6 +507,22 @@ static int on_begin_headers_callback(nghttp2_session *session __attribute__((unu
     return 0;
 }
 
+/**
+ * on_header_callback - 解析请求头字段
+ *
+ * 处理 HTTP/2 伪头（:path, :method）和普通头字段。
+ * 提取缓存相关头（If-None-Match, If-Modified-Since）。
+ *
+ * @param session nghttp2 会话
+ * @param frame 当前帧
+ * @param name 头名
+ * @param namelen 头名长度
+ * @param value 头值
+ * @param valuelen 头值长度
+ * @param flags 标志（未使用）
+ * @param user_data 未使用
+ * @return 0 成功
+ */
 static int on_header_callback(nghttp2_session *session,
                               const nghttp2_frame *frame, const uint8_t *name,
                               size_t namelen, const uint8_t *value,
@@ -438,6 +603,16 @@ static int on_header_callback(nghttp2_session *session,
     return 0;
 }
 
+/**
+ * on_frame_recv_callback - 帧接收完成回调
+ *
+ * 当收到 END_STREAM 标志时，标记请求完整并触发静态文件服务。
+ *
+ * @param session nghttp2 会话
+ * @param frame 当前帧
+ * @param user_data 会话指针
+ * @return 0 成功
+ */
 static int on_frame_recv_callback(nghttp2_session *session,
                                   const nghttp2_frame *frame, void *user_data) {
     http2_session_t *h2 = (http2_session_t *)user_data;
@@ -466,6 +641,17 @@ static int on_frame_recv_callback(nghttp2_session *session,
     return 0;
 }
 
+/**
+ * on_stream_close_callback - 流关闭回调
+ *
+ * 从链表移除流，释放资源（关闭文件、释放 body、释放请求）。
+ *
+ * @param session nghttp2 会话（未使用）
+ * @param stream_id 流 ID
+ * @param error_code 错误码（未使用）
+ * @param user_data 会话指针
+ * @return 0 成功
+ */
 static int on_stream_close_callback(nghttp2_session *session __attribute__((unused)),
                                     int32_t stream_id, uint32_t error_code __attribute__((unused)),
                                     void *user_data) {
@@ -492,6 +678,19 @@ static int on_stream_close_callback(nghttp2_session *session __attribute__((unus
     return 0;
 }
 
+/**
+ * on_data_chunk_recv_callback - DATA 帧数据块接收回调
+ *
+ * 目前为占位实现，TODO：将请求体数据追加到流缓冲区。
+ *
+ * @param session nghttp2 会话（未使用）
+ * @param flags 标志（未使用）
+ * @param stream_id 流 ID
+ * @param data 数据指针
+ * @param len 数据长度
+ * @param user_data 未使用
+ * @return 0 成功
+ */
 static int on_data_chunk_recv_callback(nghttp2_session *session __attribute__((unused)),
                                        uint8_t flags __attribute__((unused)),
                                        int32_t stream_id, const uint8_t *data,
@@ -511,6 +710,15 @@ static int on_data_chunk_recv_callback(nghttp2_session *session __attribute__((u
 
 /* ===================== HTTP/2 静态文件服务 ===================== */
 
+/**
+ * format_http_time - 格式化 HTTP 时间字符串
+ *
+ * 将 time_t 转换为 "Mon, 01 Jan 2000 00:00:00 GMT" 格式。
+ *
+ * @param t 时间戳
+ * @param buf 输出缓冲区
+ * @param buf_size 缓冲区大小
+ */
 static void format_http_time(time_t t, char *buf, size_t buf_size) {
     struct tm *gmt = gmtime(&t);
     if (gmt) {
@@ -520,10 +728,27 @@ static void format_http_time(time_t t, char *buf, size_t buf_size) {
     }
 }
 
+/**
+ * generate_etag - 生成 ETag 字符串
+ *
+ * 根据文件大小和修改时间生成强 ETag。
+ *
+ * @param st 文件状态结构
+ * @param buf 输出缓冲区
+ * @param buf_size 缓冲区大小
+ */
 static void generate_etag(const struct stat *st, char *buf, size_t buf_size) {
     snprintf(buf, buf_size, "\"%lx-%lx\"", (unsigned long)st->st_size, (unsigned long)st->st_mtime);
 }
 
+/**
+ * parse_http_time - 解析 HTTP 时间字符串
+ *
+ * 支持三种格式：RFC 1123、RFC 850、ANSI C's asctime()。
+ *
+ * @param str 时间字符串
+ * @return 解析后的时间戳，-1 失败
+ */
 static time_t parse_http_time(const char *str) {
     struct tm tm = {0};
     if (strptime(str, "%a, %d %b %Y %H:%M:%S GMT", &tm) != NULL ||
@@ -534,6 +759,15 @@ static time_t parse_http_time(const char *str) {
     return -1;
 }
 
+/**
+ * match_etag - 匹配 ETag
+ *
+ * 支持 "*" 通配符和弱验证器（W/ 前缀）。
+ *
+ * @param etag 服务器 ETag
+ * @param if_none_match 客户端 If-None-Match 头值
+ * @return true 匹配
+ */
 static bool match_etag(const char *etag, const char *if_none_match) {
     if (!etag || !if_none_match) return false;
     if (strcmp(if_none_match, "*") == 0) return true;
@@ -542,6 +776,21 @@ static bool match_etag(const char *etag, const char *if_none_match) {
     return strcmp(client, etag) == 0;
 }
 
+/**
+ * http2_data_source_read_callback - nghttp2 数据读取回调
+ *
+ * 从流的 response_body 缓冲区读取数据，供 nghttp2 发送 DATA 帧。
+ * 数据发完后设置 EOF 标志。
+ *
+ * @param session nghttp2 会话（未使用）
+ * @param stream_id 流 ID（未使用）
+ * @param buf 输出缓冲区
+ * @param length 最大读取长度
+ * @param data_flags 输出标志（设置 EOF）
+ * @param source 数据源（含 stream 指针）
+ * @param user_data 未使用
+ * @return 读取字节数
+ */
 static ssize_t http2_data_source_read_callback(
     nghttp2_session *session __attribute__((unused)),
     int32_t stream_id __attribute__((unused)),
@@ -572,6 +821,18 @@ static ssize_t http2_data_source_read_callback(
     return (ssize_t)to_send;
 }
 
+/**
+ * http2_serve_directory - 生成 HTTP/2 目录浏览页面
+ *
+ * 读取目录内容，生成 HTML 列表，通过 nghttp2 发送响应。
+ * 支持文件大小格式化、修改时间显示、HTML 转义、上级目录链接。
+ *
+ * @param h2 会话指针
+ * @param stream 流数据
+ * @param real_path 真实目录路径
+ * @param request_path 请求路径（用于显示）
+ * @return true 成功处理，false 不是目录或出错
+ */
 static bool http2_serve_directory(http2_session_t *h2, http2_stream_data_t *stream,
                                    const char *real_path, const char *request_path) {
     struct stat st;
@@ -743,6 +1004,16 @@ static bool http2_serve_directory(http2_session_t *h2, http2_stream_data_t *stre
     return true;
 }
 
+/**
+ * http2_serve_static - 处理 HTTP/2 静态文件请求
+ *
+ * 路径安全检查、目录处理（index.html 或目录浏览）、缓存协商（304）、
+ * 文件读取、压缩（brotli/gzip）、响应构建。
+ * 支持 HEAD 请求（不发送 body）。
+ *
+ * @param h2 会话指针
+ * @param stream 流数据（含请求信息）
+ */
 static void http2_serve_static(http2_session_t *h2, http2_stream_data_t *stream) {
     if (!h2->root_dir) {
         nghttp2_nv hdrs[] = {
@@ -972,6 +1243,16 @@ static void http2_serve_static(http2_session_t *h2, http2_stream_data_t *stream)
 
 /* ===================== 连接处理 ===================== */
 
+/**
+ * http2_on_connection_accepted - 新连接接入时初始化 HTTP/2
+ *
+ * TLS 模式：直接创建 HTTP/2 会话并发送前言。
+ * 明文模式：返回 0，由 server.c 在读取前几个字节后检测 PRI 魔术字。
+ *
+ * @param fd 客户端 socket
+ * @param tls_mode 是否为 TLS 模式
+ * @return 0 成功，-1 失败
+ */
 int http2_on_connection_accepted(int fd, bool tls_mode) {
     /* 检查是否应启用 HTTP/2 */
     if (!tls_mode) {

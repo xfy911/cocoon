@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <dirent.h>
 #include <zlib.h>
 #include <brotli/encode.h>
 
@@ -108,6 +109,8 @@ static int on_data_chunk_recv_callback(nghttp2_session *session,
 static ssize_t http2_data_source_read_callback(nghttp2_session *session, int32_t stream_id,
                                                uint8_t *buf, size_t length, uint32_t *data_flags,
                                                nghttp2_data_source *source, void *user_data);
+static bool http2_serve_directory(http2_session_t *h2, http2_stream_data_t *stream,
+                                   const char *real_path, const char *request_path);
 static void http2_serve_static(http2_session_t *h2, http2_stream_data_t *stream);
 
 /* ===================== 会话管理 ===================== */
@@ -569,6 +572,177 @@ static ssize_t http2_data_source_read_callback(
     return (ssize_t)to_send;
 }
 
+static bool http2_serve_directory(http2_session_t *h2, http2_stream_data_t *stream,
+                                   const char *real_path, const char *request_path) {
+    struct stat st;
+    if (stat(real_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        return false;
+    }
+
+    DIR *dir = opendir(real_path);
+    if (!dir) {
+        nghttp2_nv hdrs[] = {
+            {(uint8_t *)":status", (uint8_t *)"403", 7, 3, 0}};
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+        return true;
+    }
+
+    /* 收集所有目录项 */
+    struct dirent *entry;
+    char *entries[4096];
+    int num_entries = 0;
+    while ((entry = readdir(dir)) != NULL && num_entries < 4096) {
+        if (entry->d_name[0] == '.') continue;
+        entries[num_entries] = strdup(entry->d_name);
+        num_entries++;
+    }
+    closedir(dir);
+
+    /* 构建 HTML */
+    char *html = (char *)malloc(65536);
+    if (!html) {
+        for (int i = 0; i < num_entries; i++) free(entries[i]);
+        nghttp2_nv hdrs[] = {
+            {(uint8_t *)":status", (uint8_t *)"500", 7, 3, 0}};
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+        return true;
+    }
+
+    int n = snprintf(html, 65536,
+        "<!DOCTYPE html>\n"
+        "<html><head>\n"
+        "<meta charset=\"utf-8\">\n"
+        "<title>Index of %s</title>\n"
+        "<style>"
+        "body{font-family:system-ui,-apple-system,sans-serif;max-width:800px;margin:40px auto;padding:0 20px}"
+        "h1{border-bottom:1px solid #ddd;padding-bottom:10px}"
+        "table{width:100%%;border-collapse:collapse}"
+        "th{text-align:left;padding:8px;border-bottom:2px solid #ddd}"
+        "td{padding:8px;border-bottom:1px solid #eee}"
+        "a{text-decoration:none;color:#0066cc}"
+        "a:hover{text-decoration:underline}"
+        "</style>\n"
+        "</head><body>\n"
+        "<h1>Index of %s</h1>\n"
+        "<table>\n"
+        "<tr><th>Name</th><th>Size</th><th>Modified</th></tr>\n",
+        request_path, request_path);
+
+    /* 添加返回上级链接 */
+    if (strcmp(request_path, "/") != 0) {
+        n += snprintf(html + n, 65536 - n,
+            "<tr><td><a href=\"../\">../</a></td><td>-</td><td>-</td></tr>\n");
+    }
+
+    /* HTML 转义辅助 */
+    auto void html_escape(const char *src, char *dst, size_t dst_size) {
+        size_t j = 0;
+        for (size_t i = 0; src[i] && j < dst_size - 1; i++) {
+            switch (src[i]) {
+                case '&':
+                    if (j + 5 < dst_size) { memcpy(dst + j, "&amp;", 5); j += 5; }
+                    break;
+                case '<':
+                    if (j + 4 < dst_size) { memcpy(dst + j, "&lt;", 4); j += 4; }
+                    break;
+                case '>':
+                    if (j + 4 < dst_size) { memcpy(dst + j, "&gt;", 4); j += 4; }
+                    break;
+                case '"':
+                    if (j + 6 < dst_size) { memcpy(dst + j, "&quot;", 6); j += 6; }
+                    break;
+                default:
+                    dst[j++] = src[i];
+            }
+        }
+        dst[j] = '\0';
+    }
+
+    /* 添加目录项 */
+    for (int i = 0; i < num_entries; i++) {
+        char full_path[4096];
+        snprintf(full_path, sizeof(full_path), "%s/%s", real_path, entries[i]);
+
+        struct stat entry_st;
+        char size_str[32] = "-";
+        char mtime_str[32] = "-";
+
+        if (stat(full_path, &entry_st) == 0) {
+            if (S_ISDIR(entry_st.st_mode)) {
+                strncpy(size_str, "-", sizeof(size_str));
+            } else if (entry_st.st_size < 1024) {
+                snprintf(size_str, sizeof(size_str), "%ld B", (long)entry_st.st_size);
+            } else if (entry_st.st_size < 1024 * 1024) {
+                snprintf(size_str, sizeof(size_str), "%.1f KB", entry_st.st_size / 1024.0);
+            } else if (entry_st.st_size < 1024 * 1024 * 1024) {
+                snprintf(size_str, sizeof(size_str), "%.1f MB", entry_st.st_size / (1024.0 * 1024));
+            } else {
+                snprintf(size_str, sizeof(size_str), "%.1f GB", entry_st.st_size / (1024.0 * 1024 * 1024));
+            }
+
+            struct tm *tm_info = localtime(&entry_st.st_mtime);
+            if (tm_info) {
+                strftime(mtime_str, sizeof(mtime_str), "%Y-%m-%d %H:%M", tm_info);
+            }
+        }
+
+        char escaped_name[512];
+        html_escape(entries[i], escaped_name, sizeof(escaped_name));
+
+        n += snprintf(html + n, 65536 - n,
+            "<tr><td><a href=\"%s%s\">%s%s</a></td><td>%s</td><td>%s</td></tr>\n",
+            escaped_name,
+            S_ISDIR(entry_st.st_mode) ? "/" : "",
+            escaped_name,
+            S_ISDIR(entry_st.st_mode) ? "/" : "",
+            size_str, mtime_str);
+
+        free(entries[i]);
+    }
+
+    n += snprintf(html + n, 65536 - n,
+        "</table>\n"
+        "<hr>\n"
+        "<p><em>Cocoon Server</em></p>\n"
+        "</body></html>\n");
+
+    /* 存储响应并发送 */
+    stream->response_body = html;
+    stream->response_len = (size_t)n;
+    stream->response_sent = 0;
+
+    nghttp2_nv hdrs[8];
+    int num_hdrs = 0;
+
+    hdrs[num_hdrs++] = (nghttp2_nv){
+        (uint8_t *)":status", (uint8_t *)"200", 7, 3, 0};
+
+    hdrs[num_hdrs++] = (nghttp2_nv){
+        (uint8_t *)"content-type", (uint8_t *)"text/html; charset=utf-8", 12, 24, 0};
+
+    char content_length_str[32];
+    snprintf(content_length_str, sizeof(content_length_str), "%d", n);
+    hdrs[num_hdrs++] = (nghttp2_nv){
+        (uint8_t *)"content-length", (uint8_t *)content_length_str, 14, strlen(content_length_str), 0};
+
+    hdrs[num_hdrs++] = (nghttp2_nv){
+        (uint8_t *)"server", (uint8_t *)"Cocoon/1.0", 6, 10, 0};
+
+    if (stream->request.method == HTTP_HEAD) {
+        free(stream->response_body);
+        stream->response_body = NULL;
+        stream->response_len = 0;
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, num_hdrs, NULL);
+    } else {
+        nghttp2_data_provider provider;
+        provider.source.ptr = stream;
+        provider.read_callback = http2_data_source_read_callback;
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, num_hdrs, &provider);
+    }
+
+    return true;
+}
+
 static void http2_serve_static(http2_session_t *h2, http2_stream_data_t *stream) {
     if (!h2->root_dir) {
         nghttp2_nv hdrs[] = {
@@ -614,26 +788,26 @@ static void http2_serve_static(http2_session_t *h2, http2_stream_data_t *stream)
         return;
     }
     
-    /* 目录：尝试 index.html */
+    /* 目录：尝试 index.html，否则生成目录列表 */
     if (S_ISDIR(st.st_mode)) {
         char index_path[4096];
         size_t real_len = strlen(real_path);
-        if (real_len + 12 >= sizeof(index_path)) {
-            nghttp2_nv hdrs[] = {
-                {(uint8_t *)":status", (uint8_t *)"404", 7, 3, 0}};
-            nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
-            return;
-        }
-        snprintf(index_path, sizeof(index_path), "%s/index.html", real_path);
-        struct stat index_st;
-        if (stat(index_path, &index_st) == 0 && S_ISREG(index_st.st_mode)) {
-            snprintf(real_path, sizeof(real_path), "%s", index_path);
-            stat(real_path, &st);
+        if (real_len + 12 < sizeof(index_path)) {
+            snprintf(index_path, sizeof(index_path), "%s/index.html", real_path);
+            struct stat index_st;
+            if (stat(index_path, &index_st) == 0 && S_ISREG(index_st.st_mode)) {
+                snprintf(real_path, sizeof(real_path), "%s", index_path);
+                stat(real_path, &st);
+            } else {
+                /* 生成目录浏览页面 */
+                if (http2_serve_directory(h2, stream, real_path, stream->request.path)) {
+                    return;
+                }
+            }
         } else {
-            nghttp2_nv hdrs[] = {
-                {(uint8_t *)":status", (uint8_t *)"404", 7, 3, 0}};
-            nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
-            return;
+            if (http2_serve_directory(h2, stream, real_path, stream->request.path)) {
+                return;
+            }
         }
     }
     

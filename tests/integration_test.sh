@@ -572,6 +572,18 @@ fi
 assert_http2_brotli "https://$HOST/index.html" "HTTP/2 HTML brotli"
 assert_http2_brotli "https://$HOST/style.css" "HTTP/2 CSS brotli"
 assert_http2_brotli "https://$HOST/app.js" "HTTP/2 JS brotli"
+
+# HTTP/2 目录浏览测试
+h2_dir_status=$(curl --http2 -k -s -o /dev/null -w "%{http_code}" "https://$HOST/subdir/")
+h2_dir_body=$(curl --http2 -k -s "https://$HOST/subdir/")
+if [[ "$h2_dir_status" == "200" ]] && echo "$h2_dir_body" | grep -q "page.html"; then
+    echo "  ✓ HTTP/2 目录浏览 — HTTP 200，包含 page.html"
+    pass
+else
+    echo "  ✗ HTTP/2 目录浏览 — 期望 200+page.html, 实际 $h2_dir_status"
+    fail
+fi
+
 # 停止 HTTP/2 服务器，恢复 HTTP 服务器
 kill_server
 sleep 1
@@ -620,6 +632,18 @@ if [[ "$h2c_up_404" == "404" ]]; then
     pass
 else
     echo "  ✗ h2c Upgrade 404 — 期望 404, 实际 $h2c_up_404"
+    fail
+fi
+
+# HTTP/2 目录浏览测试
+# subdir 目录没有 index.html，应返回 200 目录列表
+h2c_dir_status=$(curl --http2-prior-knowledge -s -o /dev/null -w "%{http_code}" "http://$HOST/subdir/")
+h2c_dir_body=$(curl --http2-prior-knowledge -s "http://$HOST/subdir/")
+if [[ "$h2c_dir_status" == "200" ]] && echo "$h2c_dir_body" | grep -q "page.html"; then
+    echo "  ✓ h2c 目录浏览 — HTTP 200，包含 page.html"
+    pass
+else
+    echo "  ✗ h2c 目录浏览 — 期望 200+page.html, 实际 $h2c_dir_status"
     fail
 fi
 

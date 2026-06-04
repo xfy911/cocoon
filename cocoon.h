@@ -19,7 +19,7 @@
 #define COCOON_ERROR       -1   /**< 通用错误 */
 #define COCOON_NOMEM       -2   /**< 内存不足 */
 #define COCOON_NOTFOUND    -3   /**< 文件未找到 */
-#define COCOONForbidden    -4   /**< 禁止访问 */
+#define COCOON_FORBIDDEN    -4   /**< 禁止访问 */
 #define COCOON_BADREQUEST  -5   /**< 请求格式错误 */
 
 /* === 服务器配置 === */

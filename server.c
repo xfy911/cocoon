@@ -701,6 +701,12 @@ static void accept_loop(void *arg) {
                     close(client_fd);
                     continue;
                 }
+                http2_session_t *h2 = http2_session_get(client_fd);
+                if (h2) {
+                    http2_session_set_context(h2, ctx->config.root_dir,
+                                              ctx->config.gzip_enabled,
+                                              ctx->config.brotli_enabled);
+                }
             }
         }
 

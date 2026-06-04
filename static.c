@@ -1,36 +1,32 @@
-
+﻿
 /**
- * static.c - 静态资源服务实现
+ * static.c - 闈欐€佽祫婧愭湇鍔″疄鐜?
  *
- * 提供文件服务、目录列表、错误响应功能。
- * 利用 coco 的 I/O API 实现非阻塞文件传输。
+ * 鎻愪緵鏂囦欢鏈嶅姟銆佺洰褰曞垪琛ㄣ€侀敊璇搷搴斿姛鑳姐€?
+ * 鍒╃敤 coco 鐨?I/O API 瀹炵幇闈為樆濉炴枃浠朵紶杈撱€?
  *
  * @author xfy
  */
 
 #include "static.h"
 #include "cocoon.h"
+#include "platform.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include <sys/sendfile.h>
 #include <time.h>
-#include <dirent.h>
 #include <errno.h>
 #include <zlib.h>
 #include <brotli/encode.h>
 
 /**
- * is_compressible_mime - 判断 MIME 类型是否适合压缩
+ * is_compressible_mime - 鍒ゆ柇 MIME 绫诲瀷鏄惁閫傚悎鍘嬬缉
  *
- * 文本类型通常有很高的压缩率，二进制类型（图片、视频、音频）
- * 本身已经压缩过，再压缩浪费时间且效果差。
+ * 鏂囨湰绫诲瀷閫氬父鏈夊緢楂樼殑鍘嬬缉鐜囷紝浜岃繘鍒剁被鍨嬶紙鍥剧墖銆佽棰戙€侀煶棰戯級
+ * 鏈韩宸茬粡鍘嬬缉杩囷紝鍐嶅帇缂╂氮璐规椂闂翠笖鏁堟灉宸€?
  *
- * @param mime_type MIME 类型字符串
- * @return true 适合压缩
+ * @param mime_type MIME 绫诲瀷瀛楃涓?
+ * @return true 閫傚悎鍘嬬缉
  */
 static bool is_compressible_mime(const char *mime_type) {
     if (!mime_type) return false;
@@ -45,20 +41,20 @@ static bool is_compressible_mime(const char *mime_type) {
 }
 
 /**
- * gzip_compress - 使用 zlib 压缩数据为 gzip 格式
+ * gzip_compress - 浣跨敤 zlib 鍘嬬缉鏁版嵁涓?gzip 鏍煎紡
  *
- * 使用 deflateInit2 的 windowBits = 15 + 16 来生成标准 gzip 头。
+ * 浣跨敤 deflateInit2 鐨?windowBits = 15 + 16 鏉ョ敓鎴愭爣鍑?gzip 澶淬€?
  *
- * @param src 原始数据
- * @param src_len 原始数据长度
- * @param dst 输出缓冲区（调用者分配，建议大小为 src_len）
- * @param dst_cap 输出缓冲区容量
- * @return 压缩后长度，0 表示不需要压缩（压缩后更大），-1 表示错误
+ * @param src 鍘熷鏁版嵁
+ * @param src_len 鍘熷鏁版嵁闀垮害
+ * @param dst 杈撳嚭缂撳啿鍖猴紙璋冪敤鑰呭垎閰嶏紝寤鸿澶у皬涓?src_len锛?
+ * @param dst_cap 杈撳嚭缂撳啿鍖哄閲?
+ * @return 鍘嬬缉鍚庨暱搴︼紝0 琛ㄧず涓嶉渶瑕佸帇缂╋紙鍘嬬缉鍚庢洿澶э級锛?1 琛ㄧず閿欒
  */
 static ssize_t gzip_compress(const char *src, size_t src_len,
                              char *dst, size_t dst_cap) {
     z_stream strm = {0};
-    /* 15 + 16 = gzip 格式 */
+    /* 15 + 16 = gzip 鏍煎紡 */
     if (deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
                      15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
         return -1;
@@ -77,7 +73,7 @@ static ssize_t gzip_compress(const char *src, size_t src_len,
     size_t compressed_len = dst_cap - strm.avail_out;
     deflateEnd(&strm);
 
-    /* 如果压缩后更大或差不多，就不压缩了 */
+    /* 濡傛灉鍘嬬缉鍚庢洿澶ф垨宸笉澶氾紝灏变笉鍘嬬缉浜?*/
     if (compressed_len >= src_len * 0.95) {
         return 0;
     }
@@ -85,23 +81,23 @@ static ssize_t gzip_compress(const char *src, size_t src_len,
 }
 
 /**
- * brotli_compress - 使用 Brotli 压缩数据
+ * brotli_compress - 浣跨敤 Brotli 鍘嬬缉鏁版嵁
  *
- * 使用 Brotli 编码器进行高质量压缩。
+ * 浣跨敤 Brotli 缂栫爜鍣ㄨ繘琛岄珮璐ㄩ噺鍘嬬缉銆?
  *
- * @param src 原始数据
- * @param src_len 原始数据长度
- * @param dst 输出缓冲区（调用者分配，建议大小为 src_len）
- * @param dst_cap 输出缓冲区容量
- * @return 压缩后长度，0 表示不需要压缩（压缩后更大），-1 表示错误
+ * @param src 鍘熷鏁版嵁
+ * @param src_len 鍘熷鏁版嵁闀垮害
+ * @param dst 杈撳嚭缂撳啿鍖猴紙璋冪敤鑰呭垎閰嶏紝寤鸿澶у皬涓?src_len锛?
+ * @param dst_cap 杈撳嚭缂撳啿鍖哄閲?
+ * @return 鍘嬬缉鍚庨暱搴︼紝0 琛ㄧず涓嶉渶瑕佸帇缂╋紙鍘嬬缉鍚庢洿澶э級锛?1 琛ㄧず閿欒
  */
 static ssize_t brotli_compress(const char *src, size_t src_len,
                                  char *dst, size_t dst_cap) {
     size_t encoded_size = dst_cap;
     BROTLI_BOOL ok = BrotliEncoderCompress(
-        BROTLI_DEFAULT_QUALITY,      /* 默认质量 11 */
-        BROTLI_DEFAULT_WINDOW,       /* 默认窗口大小 22 */
-        BROTLI_MODE_GENERIC,         /* 通用模式 */
+        BROTLI_DEFAULT_QUALITY,      /* 榛樿璐ㄩ噺 11 */
+        BROTLI_DEFAULT_WINDOW,       /* 榛樿绐楀彛澶у皬 22 */
+        BROTLI_MODE_GENERIC,         /* 閫氱敤妯″紡 */
         src_len,
         (const uint8_t *)src,
         &encoded_size,
@@ -109,7 +105,7 @@ static ssize_t brotli_compress(const char *src, size_t src_len,
     );
     if (!ok) return -1;
 
-    /* 如果压缩后更大或差不多，就不压缩了 */
+    /* 濡傛灉鍘嬬缉鍚庢洿澶ф垨宸笉澶氾紝灏变笉鍘嬬缉浜?*/
     if (encoded_size >= src_len * 0.95) {
         return 0;
     }
@@ -117,13 +113,13 @@ static ssize_t brotli_compress(const char *src, size_t src_len,
 }
 
 /**
- * format_http_time - 将时间戳格式化为 HTTP 日期字符串
+ * format_http_time - 灏嗘椂闂存埑鏍煎紡鍖栦负 HTTP 鏃ユ湡瀛楃涓?
  *
- * HTTP 日期格式: "Wed, 21 Oct 2015 07:28:00 GMT"
+ * HTTP 鏃ユ湡鏍煎紡: "Wed, 21 Oct 2015 07:28:00 GMT"
  *
- * @param t 时间戳（秒）
- * @param buf 输出缓冲区
- * @param buf_size 缓冲区大小
+ * @param t 鏃堕棿鎴筹紙绉掞級
+ * @param buf 杈撳嚭缂撳啿鍖?
+ * @param buf_size 缂撳啿鍖哄ぇ灏?
  */
 static void format_http_time(time_t t, char *buf, size_t buf_size) {
     struct tm *gmt = gmtime(&t);
@@ -135,45 +131,45 @@ static void format_http_time(time_t t, char *buf, size_t buf_size) {
 }
 
 /**
- * generate_etag - 基于文件元数据生成 ETag
+ * generate_etag - 鍩轰簬鏂囦欢鍏冩暟鎹敓鎴?ETag
  *
- * 格式: "大小-修改时间十六进制"
- * 示例: "1024-647a3b2f"
+ * 鏍煎紡: "澶у皬-淇敼鏃堕棿鍗佸叚杩涘埗"
+ * 绀轰緥: "1024-647a3b2f"
  *
- * @param st 文件状态结构体
- * @param buf 输出缓冲区
- * @param buf_size 缓冲区大小
+ * @param st 鏂囦欢鐘舵€佺粨鏋勪綋
+ * @param buf 杈撳嚭缂撳啿鍖?
+ * @param buf_size 缂撳啿鍖哄ぇ灏?
  */
-static void generate_etag(const struct stat *st, char *buf, size_t buf_size) {
+static void generate_etag(const cocoon_stat_t *st, char *buf, size_t buf_size) {
     snprintf(buf, buf_size, "\"%lx-%lx\"", (unsigned long)st->st_size, (unsigned long)st->st_mtime);
 }
 
 /**
- * match_etag - 比较 ETag 值是否匹配
+ * match_etag - 姣旇緝 ETag 鍊兼槸鍚﹀尮閰?
  *
- * 支持 W/ 弱匹配前缀和 * 通配符。
+ * 鏀寔 W/ 寮卞尮閰嶅墠缂€鍜?* 閫氶厤绗︺€?
  *
- * @param etag 服务器 ETag
- * @param if_none_match 客户端 If-None-Match 值
- * @return true 匹配
+ * @param etag 鏈嶅姟鍣?ETag
+ * @param if_none_match 瀹㈡埛绔?If-None-Match 鍊?
+ * @return true 鍖归厤
  */
 static bool match_etag(const char *etag, const char *if_none_match) {
     if (!etag || !if_none_match) return false;
-    /* 通配符匹配 */
+    /* 閫氶厤绗﹀尮閰?*/
     if (strcmp(if_none_match, "*") == 0) return true;
-    /* 去除 W/ 前缀比较 */
+    /* 鍘婚櫎 W/ 鍓嶇紑姣旇緝 */
     const char *client = if_none_match;
     if (strncmp(client, "W/", 2) == 0) client += 2;
     return strcmp(client, etag) == 0;
 }
 
 /**
- * parse_http_time - 解析 HTTP 日期字符串为时间戳
+ * parse_http_time - 瑙ｆ瀽 HTTP 鏃ユ湡瀛楃涓蹭负鏃堕棿鎴?
  *
- * 支持 RFC 1123 / RFC 850 / ANSI C 格式。
+ * 鏀寔 RFC 1123 / RFC 850 / ANSI C 鏍煎紡銆?
  *
- * @param str HTTP 日期字符串
- * @return 时间戳，解析失败返回 -1
+ * @param str HTTP 鏃ユ湡瀛楃涓?
+ * @return 鏃堕棿鎴筹紝瑙ｆ瀽澶辫触杩斿洖 -1
  */
 static time_t parse_http_time(const char *str) {
     struct tm tm = {0};
@@ -186,34 +182,34 @@ static time_t parse_http_time(const char *str) {
 }
 
 /**
- * safe_path_join - 安全路径拼接
+ * safe_path_join - 瀹夊叏璺緞鎷兼帴
  *
- * 防止路径遍历攻击，禁止超出根目录的访问。
+ * 闃叉璺緞閬嶅巻鏀诲嚮锛岀姝㈣秴鍑烘牴鐩綍鐨勮闂€?
  *
- * @param dst 输出缓冲区
- * @param dst_size 缓冲区大小
- * @param root 根目录
- * @param path 请求路径
- * @return true 路径安全，false 存在路径遍历风险
+ * @param dst 杈撳嚭缂撳啿鍖?
+ * @param dst_size 缂撳啿鍖哄ぇ灏?
+ * @param root 鏍圭洰褰?
+ * @param path 璇锋眰璺緞
+ * @return true 璺緞瀹夊叏锛宖alse 瀛樺湪璺緞閬嶅巻椋庨櫓
  */
 static bool safe_path_join(char *dst, size_t dst_size,
                            const char *root, const char *path) {
     if (!dst || !root || !path || dst_size == 0) return false;
 
-    /* 先规范化根目录 */
+    /* 鍏堣鑼冨寲鏍圭洰褰?*/
     char root_normalized[4096];
-    if (!realpath(root, root_normalized)) {
+    if (!cocoon_realpath(root, root_normalized, sizeof(root_normalized))) {
         snprintf(root_normalized, sizeof(root_normalized), "%s", root);
     }
     size_t root_len = strlen(root_normalized);
 
-    /* 拼接路径 */
+    /* 鎷兼帴璺緞 */
     int n = snprintf(dst, dst_size, "%s%s", root_normalized, path);
     if (n < 0 || (size_t)n >= dst_size) return false;
 
-    /* 检查路径遍历 */
+    /* 妫€鏌ヨ矾寰勯亶鍘?*/
     if (strstr(path, "..") != NULL) {
-        /* 使用 realpath 进一步验证 */
+        /* 浣跨敤 realpath 杩涗竴姝ラ獙璇?*/
         char resolved[4096];
         if (realpath(dst, resolved)) {
             if (strncmp(resolved, root_normalized, root_len) != 0) {
@@ -229,21 +225,22 @@ static bool safe_path_join(char *dst, size_t dst_size,
 }
 
 /**
- * send_all - 确保缓冲区全部发送
+ * send_all - 纭繚缂撳啿鍖哄叏閮ㄥ彂閫?
  *
- * 使用 write 循环发送，直到全部数据发送完毕或遇到不可恢复错误。
+ * 浣跨敤 write 寰幆鍙戦€侊紝鐩村埌鍏ㄩ儴鏁版嵁鍙戦€佸畬姣曟垨閬囧埌涓嶅彲鎭㈠閿欒銆?
  *
- * @param fd socket 文件描述符
- * @param buf 数据缓冲区
- * @param len 数据长度
- * @return 0 成功，-1 失败
+ * @param fd socket 鏂囦欢鎻忚堪绗?
+ * @param buf 鏁版嵁缂撳啿鍖?
+ * @param len 鏁版嵁闀垮害
+ * @return 0 鎴愬姛锛?1 澶辫触
  */
 int send_all(int fd, const char *buf, size_t len) {
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n = write(fd, buf + sent, len - sent);
+        ssize_t n = cocoon_socket_send(fd, buf + sent, len - sent);
         if (n < 0) {
-            if (errno == EAGAIN || errno == EINTR) continue;
+            int err = cocoon_get_last_error();
+            if (err == EAGAIN || err == EINTR) continue;
             return -1;
         }
         if (n == 0) return -1;
@@ -253,14 +250,14 @@ int send_all(int fd, const char *buf, size_t len) {
 }
 
 /**
- * static_send_error - 发送 HTTP 错误响应
+ * static_send_error - 鍙戦€?HTTP 閿欒鍝嶅簲
  *
- * 生成简洁的错误页面，包含状态码和状态文本。
+ * 鐢熸垚绠€娲佺殑閿欒椤甸潰锛屽寘鍚姸鎬佺爜鍜岀姸鎬佹枃鏈€?
  *
- * @param fd 客户端 socket
- * @param status_code HTTP 状态码
- * @param keep_alive 是否保持连接
- * @return COCOON_OK 成功
+ * @param fd 瀹㈡埛绔?socket
+ * @param status_code HTTP 鐘舵€佺爜
+ * @param keep_alive 鏄惁淇濇寔杩炴帴
+ * @return COCOON_OK 鎴愬姛
  */
 int static_send_error(int fd, int status_code, bool keep_alive) {
     const char *status_text = "Unknown Error";
@@ -298,15 +295,15 @@ int static_send_error(int fd, int status_code, bool keep_alive) {
 }
 
 /**
- * static_serve_file - 服务单个静态文件
+ * static_serve_file - 鏈嶅姟鍗曚釜闈欐€佹枃浠?
  *
- * 打开文件，计算内容长度，处理 Range 请求，
- * 优先使用 sendfile 零拷贝发送，回退到 read/write 循环。
+ * 鎵撳紑鏂囦欢锛岃绠楀唴瀹归暱搴︼紝澶勭悊 Range 璇锋眰锛?
+ * 浼樺厛浣跨敤 sendfile 闆舵嫹璐濆彂閫侊紝鍥為€€鍒?read/write 寰幆銆?
  *
- * @param fd 客户端 socket
- * @param req HTTP 请求
- * @param root_dir 静态资源根目录
- * @return COCOON_OK 成功，负值错误码
+ * @param fd 瀹㈡埛绔?socket
+ * @param req HTTP 璇锋眰
+ * @param root_dir 闈欐€佽祫婧愭牴鐩綍
+ * @return COCOON_OK 鎴愬姛锛岃礋鍊奸敊璇爜
  */
 int static_serve_file(int fd, const http_request_t *req, const char *root_dir, bool gzip_enabled, bool brotli_enabled) {
     char real_path[4096];
@@ -314,30 +311,30 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir, b
         return static_send_error(fd, 403, req->keep_alive);
     }
 
-    /* 检查文件是否存在且可读 */
-    struct stat st;
-    if (stat(real_path, &st) != 0) {
+    /* 妫€鏌ユ枃浠舵槸鍚﹀瓨鍦ㄤ笖鍙 */
+    cocoon_stat_t st;
+    if (cocoon_file_stat(real_path, &st) != 0) {
         return static_send_error(fd, 404, req->keep_alive);
     }
-    if (!S_ISREG(st.st_mode)) {
+    if (!cocoon_stat_isreg(&st)) {
         return static_send_error(fd, 403, req->keep_alive);
     }
 
-    /* 打开文件 */
-    int file_fd = open(real_path, O_RDONLY);
+    /* 鎵撳紑鏂囦欢 */
+    cocoon_file_t file_fd = cocoon_file_open(real_path);
     if (file_fd < 0) {
         return static_send_error(fd, 403, req->keep_alive);
     }
 
-    /* 生成 ETag 和 Last-Modified */
+    /* 鐢熸垚 ETag 鍜?Last-Modified */
     char etag[64];
     char last_modified[64];
     generate_etag(&st, etag, sizeof(etag));
-    format_http_time(st.st_mtime, last_modified, sizeof(last_modified));
+    format_http_time(cocoon_stat_mtime(&st), last_modified, sizeof(last_modified));
 
-    /* 检查缓存协商 */
+    /* 妫€鏌ョ紦瀛樺崗鍟?*/
     if (req->has_if_none_match && match_etag(etag, req->if_none_match)) {
-        close(file_fd);
+        cocoon_file_close(file_fd);
         http_response_t resp = {
             .status_code = 304,
             .status_text = "Not Modified",
@@ -354,8 +351,8 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir, b
     }
     if (req->has_if_modified_since) {
         time_t client_time = parse_http_time(req->if_modified_since);
-        if (client_time >= 0 && st.st_mtime <= client_time) {
-            close(file_fd);
+        if (client_time >= 0 && cocoon_stat_mtime(&st) <= client_time) {
+            cocoon_file_close(file_fd);
             http_response_t resp = {
                 .status_code = 304,
                 .status_text = "Not Modified",
@@ -372,8 +369,8 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir, b
         }
     }
 
-    /* 判断压缩方式：优先 brotli，回退 gzip */
-    int64_t file_size = st.st_size;
+    /* 鍒ゆ柇鍘嬬缉鏂瑰紡锛氫紭鍏?brotli锛屽洖閫€ gzip */
+    int64_t file_size = cocoon_stat_size(&st);
     bool use_gzip = false;
     bool use_brotli = false;
     char *compress_buf = NULL;
@@ -382,24 +379,24 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir, b
     if (!req->has_range && req->method != HTTP_HEAD) {
         const char *mime = http_mime_type(real_path);
         if (is_compressible_mime(mime) && file_size > 256) {
-            /* 读取文件内容到内存 */
+            /* 璇诲彇鏂囦欢鍐呭鍒板唴瀛?*/
             char *file_buf = (char *)malloc((size_t)file_size);
             if (file_buf) {
                 ssize_t read_total = 0;
                 while (read_total < file_size) {
-                    ssize_t n = read(file_fd, file_buf + read_total, (size_t)(file_size - read_total));
+                    ssize_t n = cocoon_file_read(file_fd, file_buf + read_total, (size_t)(file_size - read_total));
                     if (n <= 0) break;
                     read_total += n;
                 }
                 if (read_total == file_size) {
                     compress_buf = (char *)malloc((size_t)file_size);
                     if (compress_buf) {
-                        /* 优先 brotli */
+                        /* 浼樺厛 brotli */
                         if (brotli_enabled && req->accept_brotli) {
                             compress_len = brotli_compress(file_buf, (size_t)file_size, compress_buf, (size_t)file_size);
                             if (compress_len > 0) use_brotli = true;
                         }
-                        /* 回退 gzip */
+                        /* 鍥為€€ gzip */
                         if (!use_brotli && gzip_enabled && req->accept_gzip) {
                             compress_len = gzip_compress(file_buf, (size_t)file_size, compress_buf, (size_t)file_size);
                             if (compress_len > 0) use_gzip = true;
@@ -411,7 +408,7 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir, b
         }
     }
 
-    /* 计算发送范围 */
+    /* 璁＄畻鍙戦€佽寖鍥?*/
     int64_t send_start = 0;
     int64_t send_end = file_size - 1;
     int status_code = 200;
@@ -422,7 +419,7 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir, b
             send_end = req->range_end;
         }
         if (send_start >= file_size || send_start > send_end) {
-            close(file_fd);
+            cocoon_file_close(file_fd);
             free(compress_buf);
             return static_send_error(fd, 416, req->keep_alive);
         }
@@ -431,7 +428,7 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir, b
 
     int64_t send_length = (use_gzip || use_brotli) ? compress_len : (send_end - send_start + 1);
 
-    /* 构建响应头 */
+    /* 鏋勫缓鍝嶅簲澶?*/
     http_response_t resp = {
         .status_code = status_code,
         .status_text = status_code == 206 ? "Partial Content" : "OK",
@@ -450,64 +447,50 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir, b
     char header_buf[1024];
     int header_len = http_format_response_header(header_buf, sizeof(header_buf), &resp);
     if (header_len < 0) {
-        close(file_fd);
+        cocoon_file_close(file_fd);
         free(compress_buf);
         return static_send_error(fd, 500, req->keep_alive);
     }
 
-    /* 发送响应头 */
+    /* 鍙戦€佸搷搴斿ご */
     if (send_all(fd, header_buf, (size_t)header_len) != 0) {
-        close(file_fd);
+        cocoon_file_close(file_fd);
         free(compress_buf);
         return COCOON_ERROR;
     }
 
-    /* 发送文件内容 */
+    /* 鍙戦€佹枃浠跺唴瀹?*/
     if (req->method == HTTP_HEAD) {
-        /* HEAD 请求不发送 body */
-        close(file_fd);
+        /* HEAD 璇锋眰涓嶅彂閫?body */
+        cocoon_file_close(file_fd);
         free(compress_buf);
         return COCOON_OK;
     }
 
     if (use_gzip || use_brotli) {
-        /* 发送压缩后的数据 */
+        /* 鍙戦€佸帇缂╁悗鐨勬暟鎹?*/
         send_all(fd, compress_buf, (size_t)compress_len);
         free(compress_buf);
-        close(file_fd);
+        cocoon_file_close(file_fd);
     } else {
-        /* 定位到起始位置 */
-        if (send_start > 0) {
-            lseek(file_fd, send_start, SEEK_SET);
+        /* 浣跨敤璺ㄥ钩鍙版枃浠跺彂閫侊紙Linux sendfile / Windows read+send锛?*/
+        ssize_t sent = cocoon_file_send(fd, file_fd, send_start, (size_t)send_length);
+        cocoon_file_close(file_fd);
+        if (sent < 0) {
+            return COCOON_ERROR;
         }
-
-        /* 使用 sendfile 零拷贝发送 */
-        off_t offset = send_start;
-        ssize_t remaining = send_length;
-        while (remaining > 0) {
-            ssize_t n = sendfile(fd, file_fd, &offset, (size_t)remaining);
-            if (n < 0) {
-                if (errno == EAGAIN || errno == EINTR) continue;
-                /* sendfile 失败，回退到 read/write */
-                break;
-            }
-            if (n == 0) break;
-            remaining -= n;
-        }
-
-        close(file_fd);
     }
     return COCOON_OK;
 }
 
 /**
- * html_escape - HTML 特殊字符转义
+ * html_escape - HTML 鐗规畩瀛楃杞箟
  *
- * 将 &, <, >, " 转义为对应的 HTML 实体，防止 XSS。
+ * 灏?&, <, >, " 杞箟涓哄搴旂殑 HTML 瀹炰綋锛岄槻姝?XSS銆?
  *
- * @param src 原始字符串
- * @param dst 输出缓冲区
- * @param dst_size 缓冲区大小
+ * @param src 鍘熷瀛楃涓?
+ * @param dst 杈撳嚭缂撳啿鍖?
+ * @param dst_size 缂撳啿鍖哄ぇ灏?
  */
 static void html_escape(const char *src, char *dst, size_t dst_size) {
     size_t j = 0;
@@ -545,43 +528,42 @@ static void html_escape(const char *src, char *dst, size_t dst_size) {
 }
 
 /**
- * static_serve_directory - 生成目录浏览页面
+ * static_serve_directory - 鐢熸垚鐩綍娴忚椤甸潰
  *
- * 读取目录项，生成美观的 HTML 目录列表，支持排序。
+ * 璇诲彇鐩綍椤癸紝鐢熸垚缇庤鐨?HTML 鐩綍鍒楄〃锛屾敮鎸佹帓搴忋€?
  *
- * @param fd 客户端 socket
- * @param req HTTP 请求
- * @param root_dir 静态资源根目录
- * @param real_path 文件系统上的真实路径
- * @return COCOON_OK 成功，负值错误码
+ * @param fd 瀹㈡埛绔?socket
+ * @param req HTTP 璇锋眰
+ * @param root_dir 闈欐€佽祫婧愭牴鐩綍
+ * @param real_path 鏂囦欢绯荤粺涓婄殑鐪熷疄璺緞
+ * @return COCOON_OK 鎴愬姛锛岃礋鍊奸敊璇爜
  */
 int static_serve_directory(int fd, const http_request_t *req,
                            const char *root_dir, const char *real_path) {
-    (void)root_dir;    /* 未直接使用，real_path 已通过 safe_path_join 处理 */
+    (void)root_dir;    /* 鏈洿鎺ヤ娇鐢紝real_path 宸查€氳繃 safe_path_join 澶勭悊 */
     
-    /* 检查目录是否可访问 */
-    struct stat st;
-    if (stat(real_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
+    /* 妫€鏌ョ洰褰曟槸鍚﹀彲璁块棶 */
+    cocoon_stat_t st;
+    if (cocoon_file_stat(real_path, &st) != 0 || !cocoon_stat_isdir(&st)) {
         return static_send_error(fd, 404, req->keep_alive);
     }
 
-    DIR *dir = opendir(real_path);
-    if (!dir) {
+    cocoon_dir_iter_t iter;
+    if (cocoon_dir_open(&iter, real_path) != 0) {
         return static_send_error(fd, 403, req->keep_alive);
     }
 
-    /* 先收集所有目录项 */
-    struct dirent *entry;
+    /* 鍏堟敹闆嗘墍鏈夌洰褰曢」 */
     char *entries[4096];
     int num_entries = 0;
-    while ((entry = readdir(dir)) != NULL && num_entries < 4096) {
-        if (entry->d_name[0] == '.') continue; /* 隐藏文件 */
-        entries[num_entries] = strdup(entry->d_name);
+    while (cocoon_dir_next(&iter) == 0 && num_entries < 4096) {
+        if (iter.name[0] == '.') continue; /* 闅愯棌鏂囦欢 */
+        entries[num_entries] = strdup(iter.name);
         num_entries++;
     }
-    closedir(dir);
+    cocoon_dir_close(&iter);
 
-    /* 构建 HTML */
+    /* 鏋勫缓 HTML */
     char html[65536];
     int n = snprintf(html, sizeof(html),
         "<!DOCTYPE html>\n"
@@ -603,52 +585,58 @@ int static_serve_directory(int fd, const http_request_t *req,
         "<tr><th>Name</th><th>Size</th><th>Modified</th></tr>\n",
         req->path, req->path);
 
-    /* 添加返回上级链接 */
+    /* 娣诲姞杩斿洖涓婄骇閾炬帴 */
     if (strcmp(req->path, "/") != 0) {
         n += snprintf(html + n, sizeof(html) - n,
             "<tr><td><a href=\"../\">../</a></td><td>-</td><td>-</td></tr>\n");
     }
 
-    /* 添加目录项 */
+    /* 娣诲姞鐩綍椤?*/
     for (int i = 0; i < num_entries; i++) {
         char full_path[4096];
         snprintf(full_path, sizeof(full_path), "%s/%s", real_path, entries[i]);
 
-        struct stat entry_st;
+        cocoon_stat_t entry_st;
         char size_str[32] = "-";
         char mtime_str[32] = "-";
+        bool entry_is_dir = false;
 
-        if (stat(full_path, &entry_st) == 0) {
-            /* 格式化文件大小 */
-            if (S_ISDIR(entry_st.st_mode)) {
+        if (cocoon_file_stat(full_path, &entry_st) == 0) {
+            entry_is_dir = cocoon_stat_isdir(&entry_st);
+            /* 鏍煎紡鍖栨枃浠跺ぇ灏?*/
+            if (entry_is_dir) {
                 strncpy(size_str, "-", sizeof(size_str));
-            } else if (entry_st.st_size < 1024) {
-                snprintf(size_str, sizeof(size_str), "%ld B", (long)entry_st.st_size);
-            } else if (entry_st.st_size < 1024 * 1024) {
-                snprintf(size_str, sizeof(size_str), "%.1f KB", entry_st.st_size / 1024.0);
-            } else if (entry_st.st_size < 1024 * 1024 * 1024) {
-                snprintf(size_str, sizeof(size_str), "%.1f MB", entry_st.st_size / (1024.0 * 1024));
             } else {
-                snprintf(size_str, sizeof(size_str), "%.1f GB", entry_st.st_size / (1024.0 * 1024 * 1024));
+                int64_t sz = cocoon_stat_size(&entry_st);
+                if (sz < 1024) {
+                    snprintf(size_str, sizeof(size_str), "%lld B", (long long)sz);
+                } else if (sz < 1024 * 1024) {
+                    snprintf(size_str, sizeof(size_str), "%.1f KB", sz / 1024.0);
+                } else if (sz < 1024LL * 1024 * 1024) {
+                    snprintf(size_str, sizeof(size_str), "%.1f MB", sz / (1024.0 * 1024));
+                } else {
+                    snprintf(size_str, sizeof(size_str), "%.1f GB", sz / (1024.0 * 1024 * 1024));
+                }
             }
 
-            /* 格式化修改时间 */
-            struct tm *tm_info = localtime(&entry_st.st_mtime);
+            /* 鏍煎紡鍖栦慨鏀规椂闂?*/
+            time_t mtime = cocoon_stat_mtime(&entry_st);
+            struct tm *tm_info = localtime(&mtime);
             if (tm_info) {
                 strftime(mtime_str, sizeof(mtime_str), "%Y-%m-%d %H:%M", tm_info);
             }
         }
 
-        /* HTML 转义文件名 */
+        /* HTML 杞箟鏂囦欢鍚?*/
         char escaped_name[512];
         html_escape(entries[i], escaped_name, sizeof(escaped_name));
 
         n += snprintf(html + n, sizeof(html) - n,
             "<tr><td><a href=\"%s%s\">%s%s</a></td><td>%s</td><td>%s</td></tr>\n",
             escaped_name,
-            S_ISDIR(entry_st.st_mode) ? "/" : "",
+            entry_is_dir ? "/" : "",
             escaped_name,
-            S_ISDIR(entry_st.st_mode) ? "/" : "",
+            entry_is_dir ? "/" : "",
             size_str, mtime_str);
 
         free(entries[i]);
@@ -660,7 +648,7 @@ int static_serve_directory(int fd, const http_request_t *req,
         "<p><em>Cocoon Server</em></p>\n"
         "</body></html>\n");
 
-    /* 发送响应 */
+    /* 鍙戦€佸搷搴?*/
     char header[512];
     int header_len = snprintf(header, sizeof(header),
         "HTTP/1.1 200 OK\r\n"

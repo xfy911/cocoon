@@ -89,4 +89,14 @@ void tls_close(int fd);
  */
 bool tls_has_connection(int fd);
 
+/**
+ * tls_negotiated_http2 - 检查 ALPN 是否协商为 HTTP/2
+ *
+ * 在 TLS 握手成功后调用。
+ *
+ * @param fd 客户端 socket
+ * @return true 协商为 h2
+ */
+bool tls_negotiated_http2(int fd);
+
 #endif /* COCOON_TLS_H */

@@ -22,6 +22,7 @@
 #include "log.h"
 #include "multipart.h"
 #include "tls.h"
+#include "http2.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -510,11 +511,71 @@ static void conn_cancel_timer(connection_t *conn) {
  *
  * @param arg 连接上下文指针（connection_t*）
  */
+/**
+ * handle_http2 - 处理 HTTP/2 连接
+ *
+ * 使用 nghttp2 库处理 HTTP/2 帧，服务静态资源。
+ *
+ * @param conn 连接上下文
+ */
+static void handle_http2(connection_t *conn) {
+    http2_session_t *h2 = http2_session_get(conn->fd);
+    if (!h2) return;
+
+    uint32_t timeout_ms = conn->timeout_ms > 0 ? conn->timeout_ms : CONN_TIMEOUT_MS;
+
+    while (!conn->closed && http2_want_read(h2)) {
+        /* 读取数据 */
+        char buf[8192];
+        ssize_t n;
+        if (tls_has_connection(conn->fd)) {
+            n = tls_read(conn->fd, buf, sizeof(buf));
+        } else if (coco_sched_get_current() != NULL) {
+            n = coco_read(conn->fd, buf, sizeof(buf));
+        } else {
+            n = read(conn->fd, buf, sizeof(buf));
+        }
+
+        if (n > 0) {
+            conn_reset_timer(conn, timeout_ms);
+            if (http2_recv(h2, (const uint8_t *)buf, (size_t)n) != 0) {
+                log_debug("HTTP/2 接收错误 fd=%d", conn->fd);
+                break;
+            }
+        } else if (n == 0) {
+            break; /* 对端关闭 */
+        } else {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+
+        /* 发送挂起的帧 */
+        if (http2_want_write(h2)) {
+            if (http2_send_pending(h2) != 0) {
+                break;
+            }
+        }
+    }
+
+    http2_session_destroy(h2);
+}
+
 static void client_handler(void *arg) {
     connection_t *conn = (connection_t *)arg;
     if (!conn) return;
 
     conn->coro = coco_self();
+
+    /* 检查是否是 HTTP/2 连接 */
+    if (http2_session_is_http2(conn->fd)) {
+        handle_http2(conn);
+        conn_cancel_timer(conn);
+        close_connection(conn);
+        free(conn);
+        return;
+    }
 
     /* 启动空闲定时器 */
     uint32_t timeout_ms = conn->timeout_ms > 0 ? conn->timeout_ms : CONN_TIMEOUT_MS;
@@ -631,11 +692,22 @@ static void accept_loop(void *arg) {
                 close(client_fd);
                 continue;
             }
+            /* 检查 ALPN 协商结果，创建 HTTP/2 会话 */
+            if (tls_negotiated_http2(client_fd)) {
+                log_debug("fd=%d ALPN 协商为 HTTP/2", client_fd);
+                if (http2_on_connection_accepted(client_fd, true) != 0) {
+                    log_warn("HTTP/2 会话创建失败 fd=%d", client_fd);
+                    close(client_fd);
+                    continue;
+                }
+            }
         }
 
         /* 创建连接上下文 */
         connection_t *conn = (connection_t *)calloc(1, sizeof(connection_t));
         if (!conn) {
+            http2_session_t *h2 = http2_session_get(client_fd);
+            if (h2) http2_session_destroy(h2);
             close(client_fd);
             continue;
         }

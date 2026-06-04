@@ -323,3 +323,17 @@ void tls_close(int fd) {
 bool tls_has_connection(int fd) {
     return tls_lookup(fd) != NULL;
 }
+
+bool tls_negotiated_http2(int fd) {
+    tls_conn_t *t = tls_lookup(fd);
+    if (!t || !t->ssl) return false;
+
+    const unsigned char *alpn = NULL;
+    unsigned int alpn_len = 0;
+    SSL_get0_alpn_selected(t->ssl, &alpn, &alpn_len);
+
+    if (alpn_len == 2 && memcmp(alpn, "h2", 2) == 0) {
+        return true;
+    }
+    return false;
+}

@@ -43,6 +43,7 @@ bool config_load_from_file(const char *path, cocoon_config_t *config);
 void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
                   bool has_root_dir, bool has_port, bool has_workers,
                   bool has_max_conn, bool has_timeout, bool has_log_level,
-                  bool has_gzip_enabled, bool has_brotli_enabled);
+                  bool has_gzip_enabled, bool has_brotli_enabled,
+                  bool has_tls_cert, bool has_tls_key, bool has_tls_enabled);
 
 #endif /* COCOON_CONFIG_H */

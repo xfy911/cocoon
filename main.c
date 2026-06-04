@@ -51,6 +51,9 @@ static void print_usage(const char *prog) {
     printf("  -o <ms>     连接空闲超时毫秒（默认 30000）\n");
     printf("  -l <level>  日志级别: error, warn, info, debug（默认 info）\n");
     printf("  -v          详细日志输出（等同于 -l debug）\n");
+    printf("  --cert <path>  TLS 证书路径（启用 HTTPS）\n");
+    printf("  --key <path>   TLS 私钥路径\n");
+    printf("  --tls          显式启用 TLS（需同时指定 --cert 和 --key）\n");
     printf("  --no-gzip   禁用 gzip 压缩\n");
     printf("  --no-brotli 禁用 brotli 压缩\n");
     printf("  -h          显示此帮助\n");
@@ -82,6 +85,10 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
     config->gzip_enabled = true;
     config->brotli_enabled = true;
 
+    config->tls_cert = NULL;
+    config->tls_key = NULL;
+    config->tls_enabled = false;
+
     bool has_root_dir = false;
     bool has_port = false;
     bool has_workers = false;
@@ -90,6 +97,9 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
     bool has_log_level = false;
     bool has_gzip_enabled = false;
     bool has_brotli_enabled = false;
+    bool has_tls_cert = false;
+    bool has_tls_key = false;
+    bool has_tls_enabled = false;
     const char *config_file = NULL;
 
     for (int i = 1; i < argc; i++) {
@@ -139,6 +149,17 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
         } else if (strcmp(argv[i], "--no-brotli") == 0) {
             config->brotli_enabled = false;
             has_brotli_enabled = true;
+        } else if (strcmp(argv[i], "--cert") == 0) {
+            if (++i >= argc) return false;
+            config->tls_cert = strdup(argv[i]);
+            has_tls_cert = true;
+        } else if (strcmp(argv[i], "--key") == 0) {
+            if (++i >= argc) return false;
+            config->tls_key = strdup(argv[i]);
+            has_tls_key = true;
+        } else if (strcmp(argv[i], "--tls") == 0) {
+            config->tls_enabled = true;
+            has_tls_enabled = true;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             exit(0);
@@ -156,7 +177,9 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
         }
         /* 用命令行参数覆盖配置文件 */
         config_merge(config, config, has_root_dir, has_port, has_workers,
-                     has_max_conn, has_timeout, has_log_level, has_gzip_enabled, has_brotli_enabled);
+                     has_max_conn, has_timeout, has_log_level,
+                     has_gzip_enabled, has_brotli_enabled,
+                     has_tls_cert, has_tls_key, has_tls_enabled);
     }
 
     if (!config->root_dir) {
@@ -205,11 +228,10 @@ int main(int argc, char *argv[]) {
     server_destroy(g_ctx);
     g_ctx = NULL;
 
-    /* 释放配置文件分配的 root_dir */
-    if (config.root_dir) {
-        free((void *)config.root_dir);
-        config.root_dir = NULL;
-    }
+    /* 释放配置文件分配的内存 */
+    if (config.root_dir) free((void *)config.root_dir);
+    if (config.tls_cert) free((void *)config.tls_cert);
+    if (config.tls_key) free((void *)config.tls_key);
 
     return ret == COCOON_OK ? 0 : 1;
 }

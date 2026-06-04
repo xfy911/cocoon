@@ -18,7 +18,9 @@ TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"; kill_server' EXIT
 
 kill_server() {
-    pkill -f "$SERVER.*$HOST" 2>/dev/null || true
+    pkill -f "cocoon.*-p 9999" 2>/dev/null || true
+    pkill -f "cocoon.*--cert" 2>/dev/null || true
+    sleep 0.5
 }
 
 # 启动服务器
@@ -145,7 +147,7 @@ assert_body_contains() {
     local expect="$2"
     local desc="${3:-$url}"
     local body
-    body=$(curl -s "$url")
+    body=$(curl -s -k "$url")
     if echo "$body" | grep -q "$expect"; then
         echo "  ✓ $desc — 响应体包含 '$expect'"
         pass
@@ -410,6 +412,45 @@ assert_status_405 "$BASE/index.html" "PUT 405"
 echo ""
 echo "=== 文件上传测试 ==="
 assert_post_multipart "$BASE/upload" "multipart 文件上传"
+
+echo ""
+echo "=== TLS/HTTPS 测试 ==="
+# 启动 HTTPS 服务器（使用测试证书）
+kill_server
+sleep 1
+$SERVER -r "$ROOT" -p 9999 --cert tests/server.crt --key tests/server.key > "$TMPDIR/server_tls.log" 2>&1 &
+pid_tls=$!
+
+# 等待服务器就绪（curl -k 忽略证书验证）
+for i in {1..50}; do
+    if curl -s -o /dev/null -k --max-time 2 "https://$HOST/" 2>/dev/null; then
+        break
+    fi
+    sleep 0.2
+done
+
+# 使用 openssl s_client 验证 TLS 握手
+if command -v openssl >/dev/null 2>&1; then
+    tls_resp=$(echo -e "GET / HTTP/1.1\r\nHost: $HOST\r\nConnection: close\r\n\r\n" | \
+        timeout 5 openssl s_client -connect "$HOST" -quiet 2>/dev/null | head -20)
+    if echo "$tls_resp" | grep -q "HTTP/1.1"; then
+        echo "  ✓ TLS 握手 + HTTP GET — 通过 HTTPS 获取响应"
+        pass
+    else
+        echo "  ✗ TLS 握手 + HTTP GET — 未能通过 HTTPS 获取响应"
+        fail
+    fi
+else
+    echo "  ⚠ openssl 未安装，跳过 TLS 握手验证"
+fi
+
+# 使用 curl -k 验证 HTTPS 响应体
+assert_body_contains "https://$HOST/" "Cocoon" "HTTPS 首页响应"
+
+# 停止 HTTPS 服务器，恢复 HTTP 服务器
+kill_server
+sleep 1
+start_server
 
 echo ""
 echo "=== 结果汇总 ==="

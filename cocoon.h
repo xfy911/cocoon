@@ -38,6 +38,9 @@ typedef struct cocoon_config {
     log_level_t log_level;       /**< 日志级别 */
     bool        gzip_enabled;    /**< 是否启用 gzip 压缩（默认 true） */
     bool        brotli_enabled;   /**< 是否启用 brotli 压缩（默认 true） */
+    bool        tls_enabled;     /**< 是否启用 TLS（由 cert/key 自动推断） */
+    const char *tls_cert;        /**< TLS 证书路径 */
+    const char *tls_key;         /**< TLS 私钥路径 */
 } cocoon_config_t;
 
 /* === 服务器生命周期 API === */

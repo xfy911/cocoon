@@ -21,6 +21,7 @@
 #include "cocoon.h"
 #include "log.h"
 #include "multipart.h"
+#include "tls.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,6 +89,7 @@ static void set_nonblocking(int fd) {
  */
 static void close_connection(connection_t *conn) {
     if (conn && conn->fd >= 0) {
+        tls_close(conn->fd);
         close(conn->fd);
         conn->fd = -1;
         conn->closed = true;
@@ -112,8 +114,9 @@ static ssize_t conn_read(connection_t *conn) {
 
     ssize_t n;
 
-    /* 尝试使用 coco 的异步 I/O */
-    if (coco_sched_get_current() != NULL) {
+    if (tls_has_connection(conn->fd)) {
+        n = tls_read(conn->fd, conn->buf + conn->buf_len, space);
+    } else if (coco_sched_get_current() != NULL) {
         n = coco_read(conn->fd, conn->buf + conn->buf_len, space);
     } else {
         /* 无调度器时直接 read */
@@ -164,7 +167,9 @@ static int conn_read_body(connection_t *conn, http_request_t *req, size_t need) 
     /* 从 socket 读取剩余数据 */
     while (got < need) {
         ssize_t n;
-        if (coco_sched_get_current() != NULL) {
+        if (tls_has_connection(conn->fd)) {
+            n = tls_read(conn->fd, req->body + got, need - got);
+        } else if (coco_sched_get_current() != NULL) {
             n = coco_read(conn->fd, req->body + got, need - got);
         } else {
             n = read(conn->fd, req->body + got, need - got);
@@ -600,9 +605,17 @@ static void accept_loop(void *arg) {
                 const char *resp = "HTTP/1.1 503 Service Unavailable\r\n"
                                      "Content-Length: 0\r\n"
                                      "Connection: close\r\n\r\n";
-                ssize_t wr = write(client_fd, resp, strlen(resp));
-                (void)wr;
-                close(client_fd);
+                if (tls_has_context()) {
+                    if (tls_accept(client_fd) == 0) {
+                        tls_write(client_fd, resp, strlen(resp));
+                        tls_close(client_fd);
+                    }
+                    close(client_fd);
+                } else {
+                    ssize_t wr = write(client_fd, resp, strlen(resp));
+                    (void)wr;
+                    close(client_fd);
+                }
                 continue;
             }
         }
@@ -610,6 +623,15 @@ static void accept_loop(void *arg) {
         /* 设置 TCP_NODELAY 减少延迟 */
         int opt = 1;
         setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+
+        /* TLS 握手（如果启用） */
+        if (tls_has_context()) {
+            if (tls_accept(client_fd) != 0) {
+                log_warn("TLS 握手失败 fd=%d，关闭连接", client_fd);
+                close(client_fd);
+                continue;
+            }
+        }
 
         /* 创建连接上下文 */
         connection_t *conn = (connection_t *)calloc(1, sizeof(connection_t));
@@ -696,6 +718,16 @@ server_context_t *server_create(const cocoon_config_t *config) {
         return NULL;
     }
 
+    /* 初始化 TLS 上下文（如果配置了证书） */
+    if (ctx->config.tls_cert && ctx->config.tls_key) {
+        if (tls_create_context(ctx->config.tls_cert, ctx->config.tls_key) != 0) {
+            log_error("TLS 上下文初始化失败");
+            close(ctx->listen_fd);
+            free(ctx);
+            return NULL;
+        }
+    }
+
     /* 非阻塞模式 */
     set_nonblocking(ctx->listen_fd);
 
@@ -764,6 +796,8 @@ void server_stop(server_context_t *ctx) {
  */
 void server_destroy(server_context_t *ctx) {
     if (!ctx) return;
+
+    tls_destroy_context();
 
     if (ctx->listen_fd >= 0) {
         close(ctx->listen_fd);

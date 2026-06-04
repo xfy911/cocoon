@@ -447,7 +447,86 @@ fi
 # 使用 curl -k 验证 HTTPS 响应体
 assert_body_contains "https://$HOST/" "Cocoon" "HTTPS 首页响应"
 
-# 停止 HTTPS 服务器，恢复 HTTP 服务器
+echo ""
+echo "=== HTTP/2 测试 ==="
+# 使用已启动的 TLS 服务器测试 HTTP/2（ALPN 协商）
+kill_server
+sleep 1
+$SERVER -r "$ROOT" -p 9999 --cert tests/server.crt --key tests/server.key > "$TMPDIR/server_h2.log" 2>&1 &
+pid_h2=$!
+
+# 等待服务器就绪
+for i in {1..50}; do
+    if curl -s -o /dev/null -k --max-time 2 "https://$HOST/" 2>/dev/null; then
+        break
+    fi
+    sleep 0.2
+done
+
+# 验证 HTTP/2 协议版本
+h2_version=$(curl --http2 -k -s -o /dev/null -w "%{http_version}" "https://$HOST/")
+if [[ "$h2_version" == "2" ]]; then
+    echo "  ✓ HTTP/2 ALPN 协商 — 协议版本 HTTP/2"
+    pass
+else
+    echo "  ✗ HTTP/2 ALPN 协商 — 期望 HTTP/2, 实际 HTTP/$h2_version"
+    fail
+fi
+
+# HTTP/2 GET 首页
+h2_status=$(curl --http2 -k -s -o /dev/null -w "%{http_code}" "https://$HOST/")
+if [[ "$h2_status" == "200" ]]; then
+    echo "  ✓ HTTP/2 GET 首页 — HTTP 200"
+    pass
+else
+    echo "  ✗ HTTP/2 GET 首页 — 期望 200, 实际 $h2_status"
+    fail
+fi
+
+# HTTP/2 响应体
+h2_body=$(curl --http2 -k -s "https://$HOST/")
+if echo "$h2_body" | grep -q "Cocoon"; then
+    echo "  ✓ HTTP/2 响应体 — 包含 'Cocoon'"
+    pass
+else
+    echo "  ✗ HTTP/2 响应体 — 未包含 'Cocoon'"
+    fail
+fi
+
+# HTTP/2 HEAD 请求
+h2_head_status=$(curl --http2 -k -s -o /dev/null -w "%{http_code}" -I "https://$HOST/index.html")
+if [[ "$h2_head_status" == "200" ]]; then
+    echo "  ✓ HTTP/2 HEAD 请求 — HTTP 200"
+    pass
+else
+    echo "  ✗ HTTP/2 HEAD 请求 — 期望 200, 实际 $h2_head_status"
+    fail
+fi
+
+# HTTP/2 404
+h2_404=$(curl --http2 -k -s -o /dev/null -w "%{http_code}" "https://$HOST/nonexist.html")
+if [[ "$h2_404" == "404" ]]; then
+    echo "  ✓ HTTP/2 404 请求 — HTTP 404"
+    pass
+else
+    echo "  ✗ HTTP/2 404 请求 — 期望 404, 实际 $h2_404"
+    fail
+fi
+
+# HTTP/2 缓存协商（ETag 304）
+H2_ETAG=$(curl --http2 -k -sI "https://$HOST/index.html" | grep -i "ETag:" | awk '{print $2}' | tr -d '\r')
+if [[ -n "$H2_ETAG" ]]; then
+    h2_304=$(curl --http2 -k -s -o /dev/null -w "%{http_code}" -H "If-None-Match: $H2_ETAG" "https://$HOST/index.html")
+    if [[ "$h2_304" == "304" ]]; then
+        echo "  ✓ HTTP/2 If-None-Match 304 — 缓存命中"
+        pass
+    else
+        echo "  ✗ HTTP/2 If-None-Match 304 — 期望 304, 实际 $h2_304"
+        fail
+    fi
+fi
+
+# 停止 HTTP/2 服务器，恢复 HTTP 服务器
 kill_server
 sleep 1
 start_server

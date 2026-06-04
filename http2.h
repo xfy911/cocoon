@@ -30,6 +30,9 @@ typedef struct {
     int fd;                        /**< 底层 socket fd */
     bool tls_mode;                 /**< 是否通过 TLS ALPN 协商 */
     struct http2_stream_data *streams; /**< 活跃的流列表（头节点） */
+    const char *root_dir;          /**< 静态资源根目录 */
+    bool gzip_enabled;             /**< 是否启用 gzip 压缩 */
+    bool brotli_enabled;           /**< 是否启用 brotli 压缩 */
 } http2_session_t;
 
 /**
@@ -143,6 +146,16 @@ bool http2_want_write(http2_session_t *h2);
  * @return 0 成功，-1 失败（应关闭连接）
  */
 int http2_on_connection_accepted(int fd, bool tls_mode);
+
+/**
+ * http2_session_set_context - 设置 HTTP/2 会话的服务上下文
+ *
+ * @param h2              会话对象
+ * @param root_dir        静态资源根目录
+ * @param gzip_enabled    是否启用 gzip
+ * @param brotli_enabled  是否启用 brotli
+ */
+void http2_session_set_context(http2_session_t *h2, const char *root_dir, bool gzip_enabled, bool brotli_enabled);
 
 #ifdef __cplusplus
 }

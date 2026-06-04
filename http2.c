@@ -11,18 +11,26 @@
 #include "static.h"
 #include "log.h"
 #include "tls.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <time.h>
 
 /* 最大 HTTP/2 会话数 */
 #define MAX_HTTP2_SESSIONS 1024
 
 static http2_session_t *g_sessions[MAX_HTTP2_SESSIONS];
 static int g_session_count = 0;
+
+/* 静态文件服务辅助函数 */
+static void format_http_time(time_t t, char *buf, size_t buf_size);
+static void generate_etag(const struct stat *st, char *buf, size_t buf_size);
+static time_t parse_http_time(const char *str);
+static bool match_etag(const char *etag, const char *if_none_match);
 
 /* 内部函数声明 */
 static ssize_t send_callback(nghttp2_session *session __attribute__((unused)), const uint8_t *data,
@@ -44,6 +52,10 @@ static int on_data_chunk_recv_callback(nghttp2_session *session,
                                        uint8_t flags, int32_t stream_id,
                                        const uint8_t *data,
                                        size_t len, void *user_data);
+static ssize_t http2_data_source_read_callback(nghttp2_session *session, int32_t stream_id,
+                                               uint8_t *buf, size_t length, uint32_t *data_flags,
+                                               nghttp2_data_source *source, void *user_data);
+static void http2_serve_static(http2_session_t *h2, http2_stream_data_t *stream);
 
 /* ===================== 会话管理 ===================== */
 
@@ -162,6 +174,13 @@ http2_session_t *http2_session_get(int fd) {
     return g_sessions[fd];
 }
 
+void http2_session_set_context(http2_session_t *h2, const char *root_dir, bool gzip_enabled, bool brotli_enabled) {
+    if (!h2) return;
+    h2->root_dir = root_dir;
+    h2->gzip_enabled = gzip_enabled;
+    h2->brotli_enabled = brotli_enabled;
+}
+
 /* ===================== 数据收发 ===================== */
 
 int http2_recv(http2_session_t *h2, const uint8_t *buf, size_t len) {
@@ -200,11 +219,6 @@ bool http2_want_write(http2_session_t *h2) {
 
 /* ===================== nghttp2 回调 ===================== */
 
-/**
- * send_callback - nghttp2 发送回调
- *
- * 将 nghttp2 序列化后的帧数据发送到 socket。
- */
 static ssize_t send_callback(nghttp2_session *session __attribute__((unused)),
                              const uint8_t *data, size_t length,
                              int flags __attribute__((unused)),
@@ -216,7 +230,10 @@ static ssize_t send_callback(nghttp2_session *session __attribute__((unused)),
     if (h2->tls_mode && tls_has_connection(h2->fd)) {
         sent = tls_write(h2->fd, (const char *)data, length);
     } else {
-        sent = send_all(h2->fd, (const char *)data, length);
+        if (send_all(h2->fd, (const char *)data, length) != 0) {
+            return NGHTTP2_ERR_CALLBACK_FAILURE;
+        }
+        sent = (ssize_t)length;
     }
 
     if (sent < 0) {
@@ -225,9 +242,6 @@ static ssize_t send_callback(nghttp2_session *session __attribute__((unused)),
     return (int)sent;
 }
 
-/**
- * on_begin_headers_callback - 开始接收请求头
- */
 static int on_begin_headers_callback(nghttp2_session *session __attribute__((unused)),
                                      const nghttp2_frame *frame,
                                      void *user_data) {
@@ -257,9 +271,6 @@ static int on_begin_headers_callback(nghttp2_session *session __attribute__((unu
     return 0;
 }
 
-/**
- * on_header_callback - 接收单个请求头
- */
 static int on_header_callback(nghttp2_session *session,
                               const nghttp2_frame *frame, const uint8_t *name,
                               size_t namelen, const uint8_t *value,
@@ -277,7 +288,7 @@ static int on_header_callback(nghttp2_session *session,
     }
 
     /* 收集伪头和普通头 */
-    if (namelen == 4 && memcmp(":path", name, 4) == 0) {
+    if (namelen == 5 && memcmp(":path", name, 5) == 0) {
         /* 解析路径（可能包含 query string） */
         size_t path_len = valuelen;
         for (size_t i = 0; i < valuelen; i++) {
@@ -287,10 +298,14 @@ static int on_header_callback(nghttp2_session *session,
             }
         }
         if (path_len > 0) {
-            memcpy(stream->request.path, value,
-                   path_len < sizeof(stream->request.path) - 1
-                       ? path_len
-                       : sizeof(stream->request.path) - 1);
+            size_t copy_len = path_len < sizeof(stream->request.path) - 1
+                ? path_len
+                : sizeof(stream->request.path) - 1;
+            memcpy(stream->request.path, value, copy_len);
+            stream->request.path[copy_len] = '\0';
+        } else {
+            stream->request.path[0] = '/';
+            stream->request.path[1] = '\0';
         }
     } else if (namelen == 7 && memcmp(":method", name, 7) == 0) {
         if (valuelen == 3 && memcmp("GET", value, 3) == 0) {
@@ -315,15 +330,27 @@ static int on_header_callback(nghttp2_session *session,
             memcpy(stream->request.headers[idx].value, value,
                    valuelen < sizeof(stream->request.headers[idx].value) - 1 ? valuelen : sizeof(stream->request.headers[idx].value) - 1);
             stream->request.num_headers++;
+
+            /* 设置缓存相关标志 */
+            if (namelen == 13 && memcmp("if-none-match", name, 13) == 0) {
+                stream->request.has_if_none_match = true;
+                size_t copy_len = valuelen < sizeof(stream->request.if_none_match) - 1
+                    ? valuelen : sizeof(stream->request.if_none_match) - 1;
+                memcpy(stream->request.if_none_match, value, copy_len);
+                stream->request.if_none_match[copy_len] = '\0';
+            } else if (namelen == 17 && memcmp("if-modified-since", name, 17) == 0) {
+                stream->request.has_if_modified_since = true;
+                size_t copy_len = valuelen < sizeof(stream->request.if_modified_since) - 1
+                    ? valuelen : sizeof(stream->request.if_modified_since) - 1;
+                memcpy(stream->request.if_modified_since, value, copy_len);
+                stream->request.if_modified_since[copy_len] = '\0';
+            }
         }
     }
 
     return 0;
 }
 
-/**
- * on_frame_recv_callback - 帧接收完成
- */
 static int on_frame_recv_callback(nghttp2_session *session,
                                   const nghttp2_frame *frame, void *user_data) {
     http2_session_t *h2 = (http2_session_t *)user_data;
@@ -340,12 +367,8 @@ static int on_frame_recv_callback(nghttp2_session *session,
             }
             stream->request_complete = true;
 
-            /* TODO: 处理请求并生成响应 */
-            /* 目前返回 501 Not Implemented */
-            nghttp2_nv hdrs[] = {
-                {(uint8_t *)":status", (uint8_t *)"501", 7, 3, 0}};
-            nghttp2_submit_response(session, frame->hd.stream_id, hdrs, 1,
-                                     NULL);
+            /* 处理静态文件请求 */
+            http2_serve_static(h2, stream);
             http2_send_pending(h2);
         }
         break;
@@ -356,9 +379,6 @@ static int on_frame_recv_callback(nghttp2_session *session,
     return 0;
 }
 
-/**
- * on_stream_close_callback - 流关闭
- */
 static int on_stream_close_callback(nghttp2_session *session __attribute__((unused)),
                                     int32_t stream_id, uint32_t error_code __attribute__((unused)),
                                     void *user_data) {
@@ -385,9 +405,6 @@ static int on_stream_close_callback(nghttp2_session *session __attribute__((unus
     return 0;
 }
 
-/**
- * on_data_chunk_recv_callback - 接收请求体数据
- */
 static int on_data_chunk_recv_callback(nghttp2_session *session __attribute__((unused)),
                                        uint8_t flags __attribute__((unused)),
                                        int32_t stream_id, const uint8_t *data,
@@ -403,6 +420,215 @@ static int on_data_chunk_recv_callback(nghttp2_session *session __attribute__((u
     (void)len;
 
     return 0;
+}
+
+/* ===================== HTTP/2 静态文件服务 ===================== */
+
+static void format_http_time(time_t t, char *buf, size_t buf_size) {
+    struct tm *gmt = gmtime(&t);
+    if (gmt) {
+        strftime(buf, buf_size, "%a, %d %b %Y %H:%M:%S GMT", gmt);
+    } else {
+        buf[0] = '\0';
+    }
+}
+
+static void generate_etag(const struct stat *st, char *buf, size_t buf_size) {
+    snprintf(buf, buf_size, "\"%lx-%lx\"", (unsigned long)st->st_size, (unsigned long)st->st_mtime);
+}
+
+static time_t parse_http_time(const char *str) {
+    struct tm tm = {0};
+    if (strptime(str, "%a, %d %b %Y %H:%M:%S GMT", &tm) != NULL ||
+        strptime(str, "%A, %d-%b-%y %H:%M:%S GMT", &tm) != NULL ||
+        strptime(str, "%a %b %d %H:%M:%S %Y", &tm) != NULL) {
+        return timegm(&tm);
+    }
+    return -1;
+}
+
+static bool match_etag(const char *etag, const char *if_none_match) {
+    if (!etag || !if_none_match) return false;
+    if (strcmp(if_none_match, "*") == 0) return true;
+    const char *client = if_none_match;
+    if (strncmp(client, "W/", 2) == 0) client += 2;
+    return strcmp(client, etag) == 0;
+}
+
+static ssize_t http2_data_source_read_callback(
+    nghttp2_session *session __attribute__((unused)),
+    int32_t stream_id __attribute__((unused)),
+    uint8_t *buf, size_t length,
+    uint32_t *data_flags,
+    nghttp2_data_source *source,
+    void *user_data __attribute__((unused))) {
+    
+    if (source->fd < 0) {
+        *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+        return 0;
+    }
+    
+    ssize_t n = read(source->fd, buf, length);
+    if (n < 0) {
+        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+    }
+    if (n == 0) {
+        *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+    }
+    return (ssize_t)n;
+}
+
+static void http2_serve_static(http2_session_t *h2, http2_stream_data_t *stream) {
+    if (!h2->root_dir) {
+        nghttp2_nv hdrs[] = {
+            {(uint8_t *)":status", (uint8_t *)"503", 7, 3, 0}};
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+        return;
+    }
+    
+    /* 构建真实路径 */
+    char real_path[4096];
+    char root_normalized[4096];
+    
+    if (!realpath(h2->root_dir, root_normalized)) {
+        snprintf(root_normalized, sizeof(root_normalized), "%s", h2->root_dir);
+    }
+    
+    int n = snprintf(real_path, sizeof(real_path), "%s%s", root_normalized, stream->request.path);
+    if (n < 0 || (size_t)n >= sizeof(real_path)) {
+        nghttp2_nv hdrs[] = {
+            {(uint8_t *)":status", (uint8_t *)"400", 7, 3, 0}};
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+        return;
+    }
+    
+    /* 路径遍历检查 */
+    if (strstr(stream->request.path, "..") != NULL) {
+        char resolved[4096];
+        if (!realpath(real_path, resolved) ||
+            strncmp(resolved, root_normalized, strlen(root_normalized)) != 0) {
+            nghttp2_nv hdrs[] = {
+                {(uint8_t *)":status", (uint8_t *)"403", 7, 3, 0}};
+            nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+            return;
+        }
+        snprintf(real_path, sizeof(real_path), "%s", resolved);
+    }
+    
+    struct stat st;
+    if (stat(real_path, &st) != 0) {
+        nghttp2_nv hdrs[] = {
+            {(uint8_t *)":status", (uint8_t *)"404", 7, 3, 0}};
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+        return;
+    }
+    
+    /* 目录：尝试 index.html */
+    if (S_ISDIR(st.st_mode)) {
+        char index_path[4096];
+        size_t real_len = strlen(real_path);
+        if (real_len + 12 >= sizeof(index_path)) {
+            nghttp2_nv hdrs[] = {
+                {(uint8_t *)":status", (uint8_t *)"404", 7, 3, 0}};
+            nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+            return;
+        }
+        snprintf(index_path, sizeof(index_path), "%s/index.html", real_path);
+        struct stat index_st;
+        if (stat(index_path, &index_st) == 0 && S_ISREG(index_st.st_mode)) {
+            snprintf(real_path, sizeof(real_path), "%s", index_path);
+            stat(real_path, &st);
+        } else {
+            nghttp2_nv hdrs[] = {
+                {(uint8_t *)":status", (uint8_t *)"404", 7, 3, 0}};
+            nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+            return;
+        }
+    }
+    
+    if (!S_ISREG(st.st_mode)) {
+        nghttp2_nv hdrs[] = {
+            {(uint8_t *)":status", (uint8_t *)"403", 7, 3, 0}};
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+        return;
+    }
+    
+    /* 生成 ETag 和 Last-Modified */
+    char etag[64];
+    char last_modified[64];
+    generate_etag(&st, etag, sizeof(etag));
+    format_http_time(st.st_mtime, last_modified, sizeof(last_modified));
+    
+    /* 检查 If-None-Match */
+    if (stream->request.has_if_none_match && match_etag(etag, stream->request.if_none_match)) {
+        nghttp2_nv hdrs[] = {
+            {(uint8_t *)":status", (uint8_t *)"304", 7, 3, 0},
+            {(uint8_t *)"etag", (uint8_t *)etag, 4, strlen(etag), 0},
+            {(uint8_t *)"last-modified", (uint8_t *)last_modified, 13, strlen(last_modified), 0},
+        };
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 3, NULL);
+        return;
+    }
+    
+    /* 检查 If-Modified-Since */
+    if (stream->request.has_if_modified_since) {
+        time_t client_time = parse_http_time(stream->request.if_modified_since);
+        if (client_time >= 0 && st.st_mtime <= client_time) {
+            nghttp2_nv hdrs[] = {
+                {(uint8_t *)":status", (uint8_t *)"304", 7, 3, 0},
+                {(uint8_t *)"etag", (uint8_t *)etag, 4, strlen(etag), 0},
+                {(uint8_t *)"last-modified", (uint8_t *)last_modified, 13, strlen(last_modified), 0},
+            };
+            nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 3, NULL);
+            return;
+        }
+    }
+    
+    /* 打开文件 */
+    int file_fd = open(real_path, O_RDONLY);
+    if (file_fd < 0) {
+        nghttp2_nv hdrs[] = {
+            {(uint8_t *)":status", (uint8_t *)"403", 7, 3, 0}};
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+        return;
+    }
+    
+    /* 构建响应头 */
+    nghttp2_nv hdrs[16];
+    int num_hdrs = 0;
+    
+    hdrs[num_hdrs++] = (nghttp2_nv){
+        (uint8_t *)":status", (uint8_t *)"200", 7, 3, 0};
+    
+    const char *mime = http_mime_type(real_path);
+    hdrs[num_hdrs++] = (nghttp2_nv){
+        (uint8_t *)"content-type", (uint8_t *)mime, 12, strlen(mime), 0};
+    
+    char content_length_str[32];
+    snprintf(content_length_str, sizeof(content_length_str), "%ld", (long)st.st_size);
+    hdrs[num_hdrs++] = (nghttp2_nv){
+        (uint8_t *)"content-length", (uint8_t *)content_length_str, 14, strlen(content_length_str), 0};
+    
+    hdrs[num_hdrs++] = (nghttp2_nv){
+        (uint8_t *)"etag", (uint8_t *)etag, 4, strlen(etag), 0};
+    
+    hdrs[num_hdrs++] = (nghttp2_nv){
+        (uint8_t *)"last-modified", (uint8_t *)last_modified, 13, strlen(last_modified), 0};
+    
+    hdrs[num_hdrs++] = (nghttp2_nv){
+        (uint8_t *)"server", (uint8_t *)"Cocoon/1.0", 6, 10, 0};
+    
+    /* HEAD 请求：不发送 body */
+    if (stream->request.method == HTTP_HEAD) {
+        close(file_fd);
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, num_hdrs, NULL);
+    } else {
+        nghttp2_data_provider provider;
+        provider.source.fd = file_fd;
+        provider.read_callback = http2_data_source_read_callback;
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, num_hdrs, &provider);
+        stream->file_fd = file_fd;
+    }
 }
 
 /* ===================== 连接处理 ===================== */

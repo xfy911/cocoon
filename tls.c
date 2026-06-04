@@ -105,6 +105,45 @@ static int flush_wbio(int fd, BIO *wbio) {
     return 0;
 }
 
+/* 内部：ALPN 选择回调，优先选择 h2，否则 http/1.1 */
+static int tls_alpn_select_cb(SSL *ssl __attribute__((unused)), const unsigned char **out,
+                               unsigned char *outlen, const unsigned char *in,
+                               unsigned int inlen, void *arg __attribute__((unused))) {
+    const unsigned char *h2 = (const unsigned char *)"h2";
+    const unsigned char *http11 = (const unsigned char *)"http/1.1";
+    unsigned int h2_len = 2;
+    unsigned int http11_len = 8;
+    
+    /* 客户端发送的 ALPN 列表格式：长度前缀字符串序列 */
+    const unsigned char *p = in;
+    unsigned int remaining = inlen;
+    
+    while (remaining > 0) {
+        unsigned char len = *p;
+        p++;
+        remaining--;
+        if (len > remaining) break;
+        
+        /* 优先匹配 h2 */
+        if (len == h2_len && memcmp(p, h2, h2_len) == 0) {
+            *out = p;
+            *outlen = h2_len;
+            return SSL_TLSEXT_ERR_OK;
+        }
+        /* 次选 http/1.1 */
+        if (len == http11_len && memcmp(p, http11, http11_len) == 0) {
+            *out = p;
+            *outlen = http11_len;
+            return SSL_TLSEXT_ERR_OK;
+        }
+        
+        p += len;
+        remaining -= len;
+    }
+    
+    return SSL_TLSEXT_ERR_NOACK;
+}
+
 /* ===== 公共 API ===== */
 
 int tls_create_context(const char *cert_path, const char *key_path) {
@@ -146,6 +185,9 @@ int tls_create_context(const char *cert_path, const char *key_path) {
         g_ctx = NULL;
         return -1;
     }
+
+    /* 注册 ALPN 回调，支持 HTTP/2 和 HTTP/1.1 协商 */
+    SSL_CTX_set_alpn_select_cb(g_ctx, tls_alpn_select_cb, NULL);
 
     log_info("TLS 上下文已初始化: cert=%s", cert_path);
     return 0;

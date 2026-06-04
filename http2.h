@@ -148,7 +148,18 @@ bool http2_want_write(http2_session_t *h2);
 int http2_on_connection_accepted(int fd, bool tls_mode);
 
 /**
- * http2_session_set_context - 设置 HTTP/2 会话的服务上下文
+ * http2_session_upgrade - 处理 h2c 升级请求
+ *
+ * 注册升级流（stream_id=1）并提交静态文件响应。
+ * 调用前应先创建会话并发送服务器 SETTINGS 前言。
+ *
+ * @param h2     HTTP/2 会话
+ * @param req    HTTP/1.1 升级请求（会被复制）
+ * @return 0 成功，-1 失败
+ */
+int http2_session_upgrade(http2_session_t *h2, const http_request_t *req);
+
+/**
  *
  * @param h2              会话对象
  * @param root_dir        静态资源根目录

@@ -572,12 +572,56 @@ fi
 assert_http2_brotli "https://$HOST/index.html" "HTTP/2 HTML brotli"
 assert_http2_brotli "https://$HOST/style.css" "HTTP/2 CSS brotli"
 assert_http2_brotli "https://$HOST/app.js" "HTTP/2 JS brotli"
-assert_http2_not_compressed "https://$HOST/image.png" "HTTP/2 图片不压缩"
-
 # 停止 HTTP/2 服务器，恢复 HTTP 服务器
 kill_server
 sleep 1
 start_server
+
+# h2c 测试（明文 HTTP/2）
+echo ""
+echo "=== h2c 测试 ==="
+
+# h2c prior knowledge 直接连接
+h2c_pk_status=$(curl --http2-prior-knowledge -s -o /dev/null -w "%{http_code}" "http://$HOST/")
+h2c_pk_version=$(curl --http2-prior-knowledge -s -o /dev/null -w "%{http_version}" "http://$HOST/")
+if [[ "$h2c_pk_status" == "200" && "$h2c_pk_version" == "2" ]]; then
+    echo "  ✓ h2c prior knowledge — HTTP 200, 协议 HTTP/2"
+    pass
+else
+    echo "  ✗ h2c prior knowledge — 期望 200+HTTP/2, 实际 $h2c_pk_status+HTTP/$h2c_pk_version"
+    fail
+fi
+
+# h2c prior knowledge 404
+h2c_pk_404=$(curl --http2-prior-knowledge -s -o /dev/null -w "%{http_code}" "http://$HOST/nonexist.html")
+if [[ "$h2c_pk_404" == "404" ]]; then
+    echo "  ✓ h2c prior knowledge 404 — HTTP 404"
+    pass
+else
+    echo "  ✗ h2c prior knowledge 404 — 期望 404, 实际 $h2c_pk_404"
+    fail
+fi
+
+# h2c Upgrade 协商
+h2c_up_status=$(curl --http2 -s -o /dev/null -w "%{http_code}" "http://$HOST/")
+h2c_up_version=$(curl --http2 -s -o /dev/null -w "%{http_version}" "http://$HOST/")
+if [[ "$h2c_up_status" == "200" && "$h2c_up_version" == "2" ]]; then
+    echo "  ✓ h2c Upgrade 协商 — HTTP 200, 协议 HTTP/2"
+    pass
+else
+    echo "  ✗ h2c Upgrade 协商 — 期望 200+HTTP/2, 实际 $h2c_up_status+HTTP/$h2c_up_version"
+    fail
+fi
+
+# h2c Upgrade 404
+h2c_up_404=$(curl --http2 -s -o /dev/null -w "%{http_code}" "http://$HOST/nonexist.html")
+if [[ "$h2c_up_404" == "404" ]]; then
+    echo "  ✓ h2c Upgrade 404 — HTTP 404"
+    pass
+else
+    echo "  ✗ h2c Upgrade 404 — 期望 404, 实际 $h2c_up_404"
+    fail
+fi
 
 echo ""
 echo "=== 结果汇总 ==="

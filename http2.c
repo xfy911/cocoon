@@ -234,6 +234,37 @@ void http2_session_set_context(http2_session_t *h2, const char *root_dir, bool g
     h2->brotli_enabled = brotli_enabled;
 }
 
+int http2_session_upgrade(http2_session_t *h2, const http_request_t *req) {
+    if (!h2 || !h2->session || !req) return -1;
+
+    /* 创建流数据（stream_id=1） */
+    http2_stream_data_t *stream = calloc(1, sizeof(http2_stream_data_t));
+    if (!stream) return -1;
+
+    stream->stream_id = 1;
+    stream->file_fd = -1;
+    stream->request = *req;
+    stream->request.body = NULL;  /* 升级请求通常无 body，避免双重释放 */
+    stream->request_complete = true;
+
+    /* 注册升级流到 nghttp2 */
+    int is_head = (req->method == HTTP_HEAD) ? 1 : 0;
+    if (nghttp2_session_upgrade2(h2->session, NULL, 0, is_head, stream) != 0) {
+        free(stream);
+        return -1;
+    }
+
+    /* 关联到会话 */
+    stream->next = h2->streams;
+    h2->streams = stream;
+    nghttp2_session_set_stream_user_data(h2->session, 1, stream);
+
+    /* 提交静态文件响应 */
+    http2_serve_static(h2, stream);
+
+    return 0;
+}
+
 /* ===================== 数据收发 ===================== */
 
 int http2_recv(http2_session_t *h2, const uint8_t *buf, size_t len) {

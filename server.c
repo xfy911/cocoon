@@ -563,13 +563,58 @@ static void handle_http2(connection_t *conn) {
     http2_session_destroy(h2);
 }
 
+/* HTTP/2 h2c 连接前言（24字节） */
+static const char H2C_PREFACE[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+#define H2C_PREFACE_LEN 24
+
+/**
+ * is_h2c_upgrade_request - 检查是否是 HTTP/1.1 Upgrade: h2c 请求
+ *
+ * @param req HTTP 请求
+ * @return true 是 h2c 升级请求
+ */
+static bool is_h2c_upgrade_request(const http_request_t *req) {
+    if (strcmp(req->version, "HTTP/1.1") != 0) return false;
+
+    bool has_upgrade = false;
+    bool has_connection_upgrade = false;
+
+    for (int i = 0; i < req->num_headers; i++) {
+        if (strcasecmp(req->headers[i].name, "upgrade") == 0) {
+            if (strcasestr(req->headers[i].value, "h2c") != NULL) {
+                has_upgrade = true;
+            }
+        } else if (strcasecmp(req->headers[i].name, "connection") == 0) {
+            if (strcasestr(req->headers[i].value, "upgrade") != NULL) {
+                has_connection_upgrade = true;
+            }
+        }
+    }
+    return has_upgrade && has_connection_upgrade;
+}
+
+/**
+ * send_h2c_upgrade_response - 发送 101 Switching Protocols
+ *
+ * @param conn 连接上下文
+ * @return true 发送成功
+ */
+static bool send_h2c_upgrade_response(connection_t *conn) {
+    const char *resp =
+        "HTTP/1.1 101 Switching Protocols\r\n"
+        "Connection: Upgrade\r\n"
+        "Upgrade: h2c\r\n"
+        "\r\n";
+    return send_all(conn->fd, resp, strlen(resp)) == 0;
+}
+
 static void client_handler(void *arg) {
     connection_t *conn = (connection_t *)arg;
     if (!conn) return;
 
     conn->coro = coco_self();
 
-    /* 检查是否是 HTTP/2 连接 */
+    /* 检查是否是 HTTP/2 连接（TLS ALPN 协商） */
     if (http2_session_is_http2(conn->fd)) {
         handle_http2(conn);
         conn_cancel_timer(conn);
@@ -599,6 +644,64 @@ static void client_handler(void *arg) {
 
         /* 有数据读取，重置定时器 */
         conn_reset_timer(conn, timeout_ms);
+
+        /* 检查 h2c 直接连接前言 */
+        if (conn->buf_len >= H2C_PREFACE_LEN &&
+            memcmp(conn->buf, H2C_PREFACE, H2C_PREFACE_LEN) == 0) {
+            log_debug("fd=%d 检测到 h2c 直接连接前言", conn->fd);
+            http2_session_t *h2 = http2_session_create(conn->fd, false);
+            if (h2) {
+                http2_session_set_context(h2, conn->root_dir,
+                                          conn->gzip_enabled,
+                                          conn->brotli_enabled);
+                if (http2_send_pending(h2) == 0) {
+                    if (http2_recv(h2, (const uint8_t *)conn->buf, conn->buf_len) == 0) {
+                        conn->buf_len = 0;
+                        handle_http2(conn);
+                        break; /* handle_http2 内部已销毁会话 */
+                    }
+                }
+                http2_session_destroy(h2);
+            }
+            break;
+        }
+
+        /* 检查 HTTP/1.1 Upgrade: h2c 请求 */
+        http_request_t req;
+        int parsed = http_parse_request(conn->buf, conn->buf_len, &req);
+        if (parsed > 0 && is_h2c_upgrade_request(&req)) {
+            /* 消费已解析的 HTTP/1.1 请求数据 */
+            if ((size_t)parsed < conn->buf_len) {
+                memmove(conn->buf, conn->buf + parsed, conn->buf_len - (size_t)parsed);
+            }
+            conn->buf_len -= (size_t)parsed;
+
+            if (send_h2c_upgrade_response(conn)) {
+                http2_session_t *h2 = http2_session_create(conn->fd, false);
+                if (h2) {
+                    http2_session_set_context(h2, conn->root_dir,
+                                              conn->gzip_enabled,
+                                              conn->brotli_enabled);
+                    if (http2_send_pending(h2) == 0) {
+                        if (http2_session_upgrade(h2, &req) == 0) {
+                            if (http2_send_pending(h2) == 0) {
+                                /* 消费缓冲区中的剩余数据 */
+                                if (conn->buf_len > 0) {
+                                    http2_recv(h2, (const uint8_t *)conn->buf, conn->buf_len);
+                                    conn->buf_len = 0;
+                                }
+                                handle_http2(conn);
+                                break; /* handle_http2 内部已销毁会话 */
+                            }
+                        }
+                        http2_session_destroy(h2);
+                    }
+                }
+            }
+            http_request_free(&req);
+            break;
+        }
+        http_request_free(&req);
 
         /* 尝试处理请求 */
         bool keep = handle_request(conn, conn->root_dir);

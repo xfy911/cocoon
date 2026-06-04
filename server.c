@@ -21,20 +21,13 @@
 #include "cocoon.h"
 #include "log.h"
 #include "multipart.h"
+#include "platform.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <errno.h>
-#include <signal.h>
-#include <fcntl.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/stat.h>
 #include <stdatomic.h>
 
-#include "../coco/include/coco.h"
+#include "coco.h"
 
 /* 单个连接缓冲区大小 */
 #define CONN_BUF_SIZE   8192
@@ -47,7 +40,7 @@
  * 包含 socket fd、接收缓冲区、解析状态、超时管理。
  */
 typedef struct {
-    int             fd;             /**< 客户端 socket */
+    cocoon_socket_t fd;             /**< 客户端 socket */
     char            buf[CONN_BUF_SIZE]; /**< 接收缓冲区 */
     size_t          buf_len;        /**< 缓冲区已用长度 */
     bool            keep_alive;     /**< 当前连接是否保持 */
@@ -60,7 +53,7 @@ typedef struct {
     bool        brotli_enabled;  /**< 是否启用 brotli 压缩 */
 } connection_t;
 struct server_context {
-    int                 listen_fd;    /**< 监听 socket */
+    cocoon_socket_t     listen_fd;    /**< 监听 socket */
     cocoon_config_t     config;       /**< 配置副本 */
     volatile int        running;      /**< 运行标志 */
     coco_sched_t       *sched;        /**< 协程调度器 */
@@ -74,9 +67,8 @@ static atomic_int g_active_connections = 0;
  *
  * @param fd socket 文件描述符
  */
-static void set_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+static void set_nonblocking(cocoon_socket_t fd) {
+    cocoon_socket_nonblock(fd);
 }
 
 /**
@@ -87,9 +79,9 @@ static void set_nonblocking(int fd) {
  * @param conn 连接上下文
  */
 static void close_connection(connection_t *conn) {
-    if (conn && conn->fd >= 0) {
-        close(conn->fd);
-        conn->fd = -1;
+    if (conn && conn->fd != COCOON_INVALID_SOCKET) {
+        cocoon_socket_close(conn->fd);
+        conn->fd = COCOON_INVALID_SOCKET;
         conn->closed = true;
         atomic_fetch_sub(&g_active_connections, 1);
     }
@@ -105,7 +97,7 @@ static void close_connection(connection_t *conn) {
  * @return 读取的字节数，0 表示对端关闭，-1 表示错误
  */
 static ssize_t conn_read(connection_t *conn) {
-    if (!conn || conn->fd < 0 || conn->closed) return -1;
+    if (!conn || conn->fd == COCOON_INVALID_SOCKET || conn->closed) return -1;
 
     size_t space = CONN_BUF_SIZE - conn->buf_len;
     if (space == 0) return -1; /* 缓冲区满 */
@@ -167,12 +159,13 @@ static int conn_read_body(connection_t *conn, http_request_t *req, size_t need) 
         if (coco_sched_get_current() != NULL) {
             n = coco_read(conn->fd, req->body + got, need - got);
         } else {
-            n = read(conn->fd, req->body + got, need - got);
+            n = cocoon_socket_recv(conn->fd, req->body + got, need - got);
         }
         if (n > 0) {
             got += (size_t)n;
         } else if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
+            int err = cocoon_get_last_error();
+            if (err == EAGAIN || err == EWOULDBLOCK || err == EINTR) continue;
             free(req->body);
             req->body = NULL;
             return -1;
@@ -230,7 +223,7 @@ static bool handle_post_request(int fd, const http_request_t *req, const char *r
                 int r = snprintf(upload_dir, sizeof(upload_dir), "%s/uploads", root_dir);
                 if (r > 0 && r < (int)sizeof(upload_dir)) {
                     /* 创建目录（忽略已存在错误） */
-                    mkdir(upload_dir, 0755);
+                    cocoon_mkdir(upload_dir);
 
                     char file_path[4096];
                     r = snprintf(file_path, sizeof(file_path), "%s/%s", upload_dir, parts[i].filename);
@@ -380,7 +373,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     /* 安全路径拼接 */
     char real_path[4096];
     char root_normalized[4096];
-    if (!realpath(root_dir, root_normalized)) {
+    if (!cocoon_realpath(root_dir, root_normalized, sizeof(root_normalized))) {
         strncpy(root_normalized, root_dir, sizeof(root_normalized) - 1);
         root_normalized[sizeof(root_normalized) - 1] = '\0';
     }
@@ -395,7 +388,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     /* 路径遍历检查 */
     if (strstr(req.path, "..") != NULL) {
         char resolved[4096];
-        if (!realpath(real_path, resolved) ||
+        if (!cocoon_realpath(real_path, resolved, sizeof(resolved)) ||
             strncmp(resolved, root_normalized, strlen(root_normalized)) != 0) {
             static_send_error(conn->fd, 403, req.keep_alive);
             http_request_free(&req);
@@ -405,14 +398,14 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     }
 
     /* 判断文件类型 */
-    struct stat st;
-    if (stat(real_path, &st) != 0) {
+    cocoon_stat_t st;
+    if (cocoon_file_stat(real_path, &st) != 0) {
         static_send_error(conn->fd, 404, req.keep_alive);
         http_request_free(&req);
         return req.keep_alive;
     }
 
-    if (S_ISDIR(st.st_mode)) {
+    if (cocoon_stat_isdir(&st)) {
         /* 目录：尝试 index.html */
         char index_path[4096];
         if (snprintf(index_path, sizeof(index_path), "%s/index.html", real_path) >= (int)sizeof(index_path)) {
@@ -420,8 +413,8 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
             http_request_free(&req);
             return req.keep_alive;
         }
-        struct stat index_st;
-        if (stat(index_path, &index_st) == 0 && S_ISREG(index_st.st_mode)) {
+        cocoon_stat_t index_st;
+        if (cocoon_file_stat(index_path, &index_st) == 0 && cocoon_stat_isreg(&index_st)) {
             /* 有 index.html，作为文件服务 */
             http_request_t index_req = req;
             if (snprintf(index_req.path, sizeof(index_req.path), "%s/index.html", req.path) >= (int)sizeof(index_req.path)) {
@@ -434,7 +427,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
             /* 无 index.html，生成目录列表 */
             static_serve_directory(conn->fd, &req, root_dir, real_path);
         }
-    } else if (S_ISREG(st.st_mode)) {
+    } else if (cocoon_stat_isreg(&st)) {
         /* 普通文件 */
         static_serve_file(conn->fd, &req, root_dir, conn->gzip_enabled, conn->brotli_enabled);
     } else {
@@ -459,11 +452,11 @@ static void conn_timeout_handler(void *arg) {
 
     conn->timer = NULL;  /* 定时器已触发，自动释放 */
 
-    if (conn->fd >= 0) {
-        log_debug("连接 fd=%d 空闲超时，强制关闭", conn->fd);
+    if (conn->fd != COCOON_INVALID_SOCKET) {
+        log_debug("连接 fd=%llu 空闲超时，强制关闭", (unsigned long long)conn->fd);
         conn->closed = true;
         /* shutdown 唤醒阻塞在 coco_read 的协程 */
-        shutdown(conn->fd, SHUT_RDWR);
+        cocoon_socket_shutdown(conn->fd);
     }
 
     if (conn->coro) {
@@ -559,7 +552,7 @@ static void accept_loop(void *arg) {
 
     uint32_t num_workers = ctx->config.num_workers;
     if (num_workers == 0) {
-        num_workers = (uint32_t)sysconf(_SC_NPROCESSORS_ONLN);
+        num_workers = cocoon_cpu_count();
         if (num_workers == 0) num_workers = 4;
     }
 
@@ -580,13 +573,14 @@ static void accept_loop(void *arg) {
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
 
-        int client_fd = accept(ctx->listen_fd,
+        cocoon_socket_t client_fd = accept(ctx->listen_fd,
                                (struct sockaddr *)&client_addr, &addr_len);
-        if (client_fd < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        if (client_fd == COCOON_INVALID_SOCKET) {
+            int err = cocoon_get_last_error();
+            if (err == EAGAIN || err == EWOULDBLOCK || err == EINTR) {
                 continue;
             }
-            log_error("accept 失败: %s", strerror(errno));
+            log_error("accept 失败: %s", cocoon_strerror(err));
             break;
         }
 
@@ -600,16 +594,15 @@ static void accept_loop(void *arg) {
                 const char *resp = "HTTP/1.1 503 Service Unavailable\r\n"
                                      "Content-Length: 0\r\n"
                                      "Connection: close\r\n\r\n";
-                ssize_t wr = write(client_fd, resp, strlen(resp));
-                (void)wr;
-                close(client_fd);
+                cocoon_socket_send(client_fd, resp, strlen(resp));
+                cocoon_socket_close(client_fd);
                 continue;
             }
         }
 
         /* 设置 TCP_NODELAY 减少延迟 */
         int opt = 1;
-        setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+        setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&opt, sizeof(opt));
 
         /* 创建连接上下文 */
         connection_t *conn = (connection_t *)calloc(1, sizeof(connection_t));
@@ -667,7 +660,7 @@ server_context_t *server_create(const cocoon_config_t *config) {
 
     /* 创建监听 socket */
     ctx->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (ctx->listen_fd < 0) {
+    if (ctx->listen_fd == COCOON_INVALID_SOCKET) {
         free(ctx);
         return NULL;
     }
@@ -684,14 +677,14 @@ server_context_t *server_create(const cocoon_config_t *config) {
     addr.sin_port = htons(config->port);
 
     if (bind(ctx->listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(ctx->listen_fd);
+        cocoon_socket_close(ctx->listen_fd);
         free(ctx);
         return NULL;
     }
 
     /* 开始监听 */
     if (listen(ctx->listen_fd, 128) < 0) {
-        close(ctx->listen_fd);
+        cocoon_socket_close(ctx->listen_fd);
         free(ctx);
         return NULL;
     }
@@ -717,7 +710,7 @@ int server_start(server_context_t *ctx) {
         /* 多线程协程模式 */
         uint32_t num_workers = ctx->config.num_workers;
         if (num_workers == 0) {
-            num_workers = (uint32_t)sysconf(_SC_NPROCESSORS_ONLN);
+            num_workers = cocoon_cpu_count();
             if (num_workers == 0) num_workers = 4;
         }
 
@@ -765,9 +758,9 @@ void server_stop(server_context_t *ctx) {
 void server_destroy(server_context_t *ctx) {
     if (!ctx) return;
 
-    if (ctx->listen_fd >= 0) {
-        close(ctx->listen_fd);
-        ctx->listen_fd = -1;
+    if (ctx->listen_fd != COCOON_INVALID_SOCKET) {
+        cocoon_socket_close(ctx->listen_fd);
+        ctx->listen_fd = COCOON_INVALID_SOCKET;
     }
 
     if (ctx->config.root_dir) {

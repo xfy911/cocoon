@@ -20,7 +20,7 @@ PREFIX ?= /usr/local
 BINDIR = $(PREFIX)/bin
 
 # 源文件
-SRCS = main.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c
+SRCS = main.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c
 OBJS = $(SRCS:.c=.o)
 TARGET = cocoon
 
@@ -78,8 +78,8 @@ unit-test: $(UNIT_TEST_BINS)
 	fi
 
 # 单元测试编译规则
-$(UNIT_TEST_DIR)/test_server: $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c $(UNITY_SRC)
-	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c $(UNITY_SRC) $(LDFLAGS)
+$(UNIT_TEST_DIR)/test_server: $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c $(UNITY_SRC) $(LDFLAGS)
 
 $(UNIT_TEST_DIR)/test_multipart: $(UNIT_TEST_DIR)/test_multipart.c multipart.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_multipart.c multipart.c $(UNITY_SRC) -lm
@@ -87,14 +87,14 @@ $(UNIT_TEST_DIR)/test_multipart: $(UNIT_TEST_DIR)/test_multipart.c multipart.c $
 $(UNIT_TEST_DIR)/test_http: $(UNIT_TEST_DIR)/test_http.c http.c log.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_http.c http.c log.c $(UNITY_SRC) -lm
 
-$(UNIT_TEST_DIR)/test_static: $(UNIT_TEST_DIR)/test_static.c http.c log.c tls.c $(UNITY_SRC)
-	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_static.c http.c log.c tls.c $(UNITY_SRC) $(LDFLAGS)
+$(UNIT_TEST_DIR)/test_static: $(UNIT_TEST_DIR)/test_static.c http.c log.c tls.c access_log.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_static.c http.c log.c tls.c access_log.c $(UNITY_SRC) $(LDFLAGS)
 
 $(UNIT_TEST_DIR)/test_log: $(UNIT_TEST_DIR)/test_log.c log.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_log.c log.c $(UNITY_SRC) -lm
 
-$(UNIT_TEST_DIR)/test_config: $(UNIT_TEST_DIR)/test_config.c config.c log.c $(UNITY_SRC)
-	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_config.c config.c log.c $(UNITY_SRC) -lm
+$(UNIT_TEST_DIR)/test_config: $(UNIT_TEST_DIR)/test_config.c config.c log.c access_log.c http.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_config.c config.c log.c access_log.c http.c $(UNITY_SRC) -lm
 
 # 编译规则
 %.o: %.c

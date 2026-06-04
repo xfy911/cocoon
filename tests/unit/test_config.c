@@ -126,7 +126,7 @@ void test_merge_override_all(void) {
         .brotli_enabled = false
     };
     config_merge(&base, &cmdline,
-                 true, true, true, true, true, true, true, true, true, true, true);
+                 true, true, true, true, true, true, true, true, true, true, true, true);
     TEST_ASSERT_EQUAL_STRING("/new", base.root_dir);
     TEST_ASSERT_EQUAL(9090, base.port);
     TEST_ASSERT_TRUE(base.threaded);
@@ -155,7 +155,7 @@ void test_merge_no_override(void) {
         .log_level = LOG_LEVEL_DEBUG
     };
     config_merge(&base, &cmdline,
-                 false, false, false, false, false, false, false, false, false, false, false);
+                 false, false, false, false, false, false, false, false, false, false, false, false);
     TEST_ASSERT_EQUAL_STRING("/old", base.root_dir);
     TEST_ASSERT_EQUAL(8080, base.port);
     TEST_ASSERT_FALSE(base.threaded);
@@ -178,7 +178,7 @@ void test_merge_partial_override(void) {
         .log_level = LOG_LEVEL_DEBUG
     };
     config_merge(&base, &cmdline,
-                 true, false, false, true, false, false, false, false, false, false, false);
+                 true, false, false, true, false, false, false, false, false, false, false, false);
     TEST_ASSERT_EQUAL_STRING("/new", base.root_dir);   /* overridden */
     TEST_ASSERT_EQUAL(8080, base.port);                /* not overridden */
     TEST_ASSERT_EQUAL(2, base.num_workers);            /* not overridden */
@@ -243,7 +243,7 @@ void test_merge_cmdline_null_root_dir(void) {
     /* cmdline root_dir 为 NULL，不应覆盖 base */
     cocoon_config_t base = {.root_dir = strdup("/old"), .port = 8080};
     cocoon_config_t cmdline = {.root_dir = NULL, .port = 9090};
-    config_merge(&base, &cmdline, true, true, false, false, false, false, false, false, false, false, false);
+    config_merge(&base, &cmdline, true, true, false, false, false, false, false, false, false, false, false, false);
     TEST_ASSERT_EQUAL_STRING("/old", base.root_dir); /* NULL 不覆盖 */
     TEST_ASSERT_EQUAL(9090, base.port);               /* port 覆盖 */
     free((void *)base.root_dir);
@@ -251,7 +251,7 @@ void test_merge_cmdline_null_root_dir(void) {
 
 void test_merge_null_safety(void) {
     /* 不应 crash */
-    config_merge(NULL, NULL, true, true, true, true, true, true, true, true, true, true, true);
+    config_merge(NULL, NULL, true, true, true, true, true, true, true, true, true, true, true, true);
     TEST_ASSERT_TRUE(1);
 }
 

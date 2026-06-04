@@ -41,6 +41,7 @@ typedef struct cocoon_config {
     bool        tls_enabled;     /**< 是否启用 TLS（由 cert/key 自动推断） */
     const char *tls_cert;        /**< TLS 证书路径 */
     const char *tls_key;         /**< TLS 私钥路径 */
+    const char *access_log_path; /**< 访问日志文件路径（NULL 或 "-" 表示 stdout） */
 } cocoon_config_t;
 
 /* === 服务器生命周期 API === */

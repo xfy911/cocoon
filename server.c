@@ -23,6 +23,7 @@
 #include "multipart.h"
 #include "tls.h"
 #include "http2.h"
+#include "access_log.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,7 +47,7 @@
 /**
  * connection_t - 单个客户端连接上下文
  *
- * 包含 socket fd、接收缓冲区、解析状态、超时管理。
+ * 包含 socket fd、接收缓冲区、解析状态、超时管理、客户端地址、响应状态。
  */
 typedef struct {
     int             fd;             /**< 客户端 socket */
@@ -60,6 +61,9 @@ typedef struct {
     coco_coro_t    *coro;           /**< 当前处理协程 */
     bool        gzip_enabled;    /**< 是否启用 gzip 压缩 */
     bool        brotli_enabled;  /**< 是否启用 brotli 压缩 */
+    struct sockaddr_storage client_addr; /**< 客户端地址 */
+    socklen_t       addr_len;       /**< 地址长度 */
+    int             response_status; /**< 最后响应的 HTTP 状态码 */
 } connection_t;
 struct server_context {
     int                 listen_fd;    /**< 监听 socket */
@@ -335,6 +339,7 @@ static bool handle_post_request(int fd, const http_request_t *req, const char *r
  *
  * 从缓冲区解析请求，判断是文件还是目录，调用对应的服务函数。
  * 新增：支持 POST 请求体读取和简单回显。
+ * 新增：记录响应状态码到访问日志。
  *
  * @param conn 连接上下文
  * @param root_dir 静态资源根目录
@@ -350,7 +355,10 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
             return true;
         }
         /* 格式错误 */
+        conn->response_status = 400;
         static_send_error(conn->fd, 400, false);
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, -1);
         return false;
     }
 
@@ -364,7 +372,11 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     if (req.content_length > 0) {
         size_t need = (size_t)req.content_length;
         if (conn_read_body(conn, &req, need) != 0) {
+            conn->response_status = 413;
             static_send_error(conn->fd, 413, req.keep_alive); /* Payload Too Large */
+            access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                             &req, conn->response_status, -1);
+            http_request_free(&req);
             return req.keep_alive;
         }
     }
@@ -372,13 +384,19 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     /* 处理 POST */
     if (req.method == HTTP_POST) {
         bool keep = handle_post_request(conn->fd, &req, conn->root_dir);
+        conn->response_status = 200; /* POST 目前总是返回 200 */
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, -1);
         http_request_free(&req);
         return keep;
     }
 
     /* 只支持 GET 和 HEAD */
     if (req.method != HTTP_GET && req.method != HTTP_HEAD) {
+        conn->response_status = 405;
         static_send_error(conn->fd, 405, req.keep_alive);
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, -1);
         http_request_free(&req);
         return req.keep_alive;
     }
@@ -393,7 +411,10 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
 
     int n = snprintf(real_path, sizeof(real_path), "%s%s", root_normalized, req.path);
     if (n < 0 || (size_t)n >= sizeof(real_path)) {
+        conn->response_status = 400;
         static_send_error(conn->fd, 400, req.keep_alive);
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, -1);
         http_request_free(&req);
         return req.keep_alive;
     }
@@ -403,7 +424,10 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         char resolved[4096];
         if (!realpath(real_path, resolved) ||
             strncmp(resolved, root_normalized, strlen(root_normalized)) != 0) {
+            conn->response_status = 403;
             static_send_error(conn->fd, 403, req.keep_alive);
+            access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                             &req, conn->response_status, -1);
             http_request_free(&req);
             return req.keep_alive;
         }
@@ -413,7 +437,10 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     /* 判断文件类型 */
     struct stat st;
     if (stat(real_path, &st) != 0) {
+        conn->response_status = 404;
         static_send_error(conn->fd, 404, req.keep_alive);
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, -1);
         http_request_free(&req);
         return req.keep_alive;
     }
@@ -422,7 +449,10 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         /* 目录：尝试 index.html */
         char index_path[4096];
         if (snprintf(index_path, sizeof(index_path), "%s/index.html", real_path) >= (int)sizeof(index_path)) {
+            conn->response_status = 400;
             static_send_error(conn->fd, 400, req.keep_alive);
+            access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                             &req, conn->response_status, -1);
             http_request_free(&req);
             return req.keep_alive;
         }
@@ -431,22 +461,31 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
             /* 有 index.html，作为文件服务 */
             http_request_t index_req = req;
             if (snprintf(index_req.path, sizeof(index_req.path), "%s/index.html", req.path) >= (int)sizeof(index_req.path)) {
+                conn->response_status = 400;
                 static_send_error(conn->fd, 400, req.keep_alive);
+                access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                                 &req, conn->response_status, -1);
                 http_request_free(&req);
                 return req.keep_alive;
             }
+            conn->response_status = 200;
             static_serve_file(conn->fd, &index_req, root_dir, conn->gzip_enabled, conn->brotli_enabled);
         } else {
             /* 无 index.html，生成目录列表 */
+            conn->response_status = 200;
             static_serve_directory(conn->fd, &req, root_dir, real_path);
         }
     } else if (S_ISREG(st.st_mode)) {
         /* 普通文件 */
+        conn->response_status = 200;
         static_serve_file(conn->fd, &req, root_dir, conn->gzip_enabled, conn->brotli_enabled);
     } else {
+        conn->response_status = 403;
         static_send_error(conn->fd, 403, req.keep_alive);
     }
 
+    access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                     &req, conn->response_status, -1);
     http_request_free(&req);
     return req.keep_alive;
 }
@@ -747,7 +786,7 @@ static void accept_loop(void *arg) {
     log_info("连接空闲超时: %u ms", ctx->config.timeout_ms > 0 ? ctx->config.timeout_ms : CONN_TIMEOUT_MS);
 
     while (ctx->running) {
-        struct sockaddr_in client_addr;
+        struct sockaddr_storage client_addr;
         socklen_t addr_len = sizeof(client_addr);
 
         int client_fd = accept(ctx->listen_fd,
@@ -828,6 +867,9 @@ static void accept_loop(void *arg) {
         conn->timeout_ms = ctx->config.timeout_ms > 0 ? ctx->config.timeout_ms : CONN_TIMEOUT_MS;
         conn->gzip_enabled = ctx->config.gzip_enabled;
         conn->brotli_enabled = ctx->config.brotli_enabled;
+        memcpy(&conn->client_addr, &client_addr, sizeof(client_addr));
+        conn->addr_len = addr_len;
+        conn->response_status = 0;
 
         atomic_fetch_add(&g_active_connections, 1);
         log_debug("新连接 fd=%d，当前活跃连接: %d", client_fd,

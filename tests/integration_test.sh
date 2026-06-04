@@ -372,6 +372,25 @@ assert_status_405() {
     fi
 }
 
+assert_access_log() {
+    local log_file="$1"
+    local desc="${2:-访问日志}"
+    if [ -f "$log_file" ] && [ -s "$log_file" ]; then
+        local count
+        count=$(grep -c '"GET /' "$log_file" || true)
+        if [ "$count" -ge 1 ]; then
+            echo "  ✓ $desc — 日志文件包含请求记录"
+            pass
+        else
+            echo "  ✗ $desc — 日志文件无请求记录"
+            fail
+        fi
+    else
+        echo "  ✗ $desc — 日志文件不存在或为空"
+        fail
+    fi
+}
+
 # ===== 测试开始 =====
 start_server
 
@@ -454,6 +473,60 @@ assert_status_405 "$BASE/index.html" "PUT 405"
 echo ""
 echo "=== 文件上传测试 ==="
 assert_post_multipart "$BASE/upload" "multipart 文件上传"
+
+echo ""
+echo "=== 访问日志测试 ==="
+# 带访问日志启动服务器
+kill_server
+sleep 1
+LOG_FILE="$TMPDIR/access.log"
+$SERVER -r "$ROOT" -p 9999 --access-log "$LOG_FILE" > "$TMPDIR/server_access.log" 2>&1 &
+pid_access=$!
+for i in {1..30}; do
+    if curl -s -o /dev/null "$BASE/" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+# 发送请求并验证日志记录
+curl -s -o /dev/null "$BASE/index.html" -H "User-Agent: CocoonTest/1.0"
+curl -s -o /dev/null "$BASE/nonexist.html" -H "Referer: http://example.com"
+sleep 0.5
+assert_access_log "$LOG_FILE" "访问日志文件生成"
+# 检查日志格式是否包含关键字段
+if grep -q '"GET /index.html HTTP/1.1"' "$LOG_FILE"; then
+    echo "  ✓ 日志包含 GET /index.html"
+    pass
+else
+    echo "  ✗ 日志缺少 GET /index.html"
+    fail
+fi
+if grep -q 'CocoonTest/1.0' "$LOG_FILE"; then
+    echo "  ✓ 日志包含 User-Agent"
+    pass
+else
+    echo "  ✗ 日志缺少 User-Agent"
+    fail
+fi
+if grep -q 'example.com' "$LOG_FILE"; then
+    echo "  ✓ 日志包含 Referer"
+    pass
+else
+    echo "  ✗ 日志缺少 Referer"
+    fail
+fi
+if grep -q '404' "$LOG_FILE"; then
+    echo "  ✓ 日志包含 404 状态码"
+    pass
+else
+    echo "  ✗ 日志缺少 404 状态码"
+    fail
+fi
+
+# 恢复普通服务器
+kill_server
+sleep 1
+start_server
 
 echo ""
 echo "=== TLS/HTTPS 测试 ==="

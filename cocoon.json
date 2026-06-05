@@ -8,5 +8,6 @@
     "log_level": "info",
     "gzip_enabled": true,
     "brotli_enabled": true,
-    "access_log": "-"
+    "plugins": "plugins/hello.so",
+  "access_log": "-"
 }

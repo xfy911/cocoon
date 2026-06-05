@@ -313,6 +313,11 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
         } else if (strcmp(key_str, "rate_limit") == 0 && val.type == TOKEN_NUMBER) {
             long v = token_to_long(&val);
             if (v >= 0 && v < 1000000) config->rate_limit = (uint32_t)v;
+        } else if (strcmp(key_str, "plugins") == 0 && val.type == TOKEN_STRING) {
+            char *v = token_str_dup(&val);
+            if (v && config->num_plugins < COCOON_MAX_PLUGINS) {
+                config->plugins[config->num_plugins++] = v;
+            }
         }
         /* 其他字段：忽略（未来扩展预留） */
 
@@ -339,7 +344,8 @@ void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
                   bool has_tls_cert, bool has_tls_key, bool has_tls_enabled,
                   bool has_access_log,
                   bool has_cors_enabled, bool has_auth_user, bool has_auth_pass,
-                  bool has_rate_limit) {
+                  bool has_rate_limit,
+                  bool has_plugins) {
     if (!base || !cmdline) return;
 
     /* 命令行显式指定的值覆盖配置文件 */
@@ -377,6 +383,13 @@ void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
         base->auth_pass = strdup(cmdline->auth_pass);
     }
     if (has_rate_limit) base->rate_limit = cmdline->rate_limit;
+    if (has_plugins) {
+        for (size_t i = 0; i < cmdline->num_plugins && i < COCOON_MAX_PLUGINS; i++) {
+            if (base->num_plugins < COCOON_MAX_PLUGINS) {
+                base->plugins[base->num_plugins++] = strdup(cmdline->plugins[i]);
+            }
+        }
+    }
     /* threaded 是 flag 参数，命令行指定了就用命令行的 */
     if (cmdline->threaded) base->threaded = true;
 }

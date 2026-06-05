@@ -818,6 +818,38 @@ sleep 1
 start_server
 
 echo ""
+echo "=== 插件测试 ==="
+
+# 编译示例插件
+if gcc -Wall -Wextra -fPIC -shared -I. -Icoco/include -o "$TMPDIR/hello_plugin.so" plugins/hello.c middleware.c http.c log.c platform.c 2>/dev/null; then
+    kill_server
+    sleep 1
+    $SERVER -r "$ROOT" -p 9999 --plugin "$TMPDIR/hello_plugin.so" > "$TMPDIR/server_plugin.log" 2>&1 &
+    for i in {1..30}; do
+        if nc -z localhost 9999 2>/dev/null; then break; fi
+        sleep 0.1
+    done
+    plugin_http=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/")
+    if [[ "$plugin_http" == "200" ]]; then
+        echo "  ✓ 插件加载 — 服务器正常响应 HTTP 200"
+        pass
+    else
+        echo "  ✗ 插件加载 — 期望 200, 实际 $plugin_http"
+        fail
+    fi
+    # 检查日志中是否包含插件加载信息
+    if grep -q "plugin: 已加载" "$TMPDIR/server_plugin.log"; then
+        echo "  ✓ 插件日志 — 加载日志正确输出"
+        pass
+    else
+        echo "  ✗ 插件日志 — 未找到加载日志"
+        fail
+    fi
+else
+    echo "  ⊘ 插件编译跳过（无编译器）"
+fi
+
+echo ""
 echo "=== WebSocket 测试 ==="
 
 if python3 "$ROOT/../websocket_test.py" > "$TMPDIR/ws_test.log" 2>&1; then

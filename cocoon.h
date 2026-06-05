@@ -27,7 +27,8 @@
  * cocoon_config - 服务器配置结构体
  *
  * 命令行参数解析后的配置。
- */
+ */#define COCOON_MAX_PLUGINS 8   /**< 最大插件数量 */
+
 typedef struct cocoon_config {
     const char *root_dir;       /**< 静态资源根目录 */
     uint16_t    port;           /**< 监听端口 */
@@ -47,6 +48,9 @@ typedef struct cocoon_config {
     const char *auth_user;         /**< Basic Auth 用户名 */
     const char *auth_pass;         /**< Basic Auth 密码 */
     uint32_t    rate_limit;        /**< 每秒最大请求数（0 表示禁用） */
+    /* 插件配置 */
+    const char *plugins[COCOON_MAX_PLUGINS]; /**< 插件路径列表 */
+    size_t      num_plugins;                   /**< 插件数量 */
 } cocoon_config_t;
 
 /* === 服务器生命周期 API === */

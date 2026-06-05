@@ -16,6 +16,7 @@
  */
 
 #include "server.h"
+#include "plugin.h"
 #include "http.h"
 #include "static.h"
 #include "cocoon.h"
@@ -1048,6 +1049,13 @@ server_context_t *server_create(const cocoon_config_t *config) {
     ctx->mw_config.rate_limit   = ctx->config.rate_limit;
     cocoon_middleware_init_builtin(&ctx->mw_config);
 
+    /* 加载插件 */
+    for (size_t i = 0; i < ctx->config.num_plugins; i++) {
+        if (cocoon_plugin_load(ctx->config.plugins[i]) != 0) {
+            log_error("插件加载失败: %s", ctx->config.plugins[i]);
+        }
+    }
+
     return ctx;
 }
 
@@ -1120,6 +1128,9 @@ void server_stop(server_context_t *ctx) {
  */
 void server_destroy(server_context_t *ctx) {
     if (!ctx) return;
+
+    /* 卸载插件 */
+    cocoon_plugin_unload_all();
 
     cocoon_middleware_cleanup();
 

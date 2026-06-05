@@ -61,7 +61,7 @@ static void print_usage(const char *prog) {
     printf("  --auth-user <user>  Basic Auth 用户名\n");
     printf("  --auth-pass <pass>  Basic Auth 密码\n");
     printf("  --rate-limit <n>    每秒最大请求数（限流）\n");
-    printf("  -h          显示此帮助\n");
+    printf("  --plugin <path>  加载插件（可多次指定）\n");
     printf("\nExample:\n");
     printf("  %s -c cocoon.json\n", prog);
     printf("  %s -r ./www -p 8080\n", prog);
@@ -100,6 +100,8 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
     config->auth_pass = NULL;
     config->rate_limit = 0;
 
+    config->num_plugins = 0;
+
     bool has_root_dir = false;
     bool has_port = false;
     bool has_workers = false;
@@ -116,6 +118,7 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
     bool has_auth_user = false;
     bool has_auth_pass = false;
     bool has_rate_limit = false;
+    bool has_plugins = false;
     const char *config_file = NULL;
 
     for (int i = 1; i < argc; i++) {
@@ -195,6 +198,15 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
             if (++i >= argc) return false;
             config->rate_limit = (uint32_t)atoi(argv[i]);
             has_rate_limit = true;
+        } else if (strcmp(argv[i], "--plugin") == 0) {
+            if (++i >= argc) return false;
+            if (config->num_plugins < COCOON_MAX_PLUGINS) {
+                config->plugins[config->num_plugins++] = strdup(argv[i]);
+                has_plugins = true;
+            } else {
+                fprintf(stderr, "Error: 最多支持 %d 个插件\n", COCOON_MAX_PLUGINS);
+                return false;
+            }
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             exit(0);
@@ -217,7 +229,8 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
                      has_tls_cert, has_tls_key, has_tls_enabled,
                      has_access_log,
                      has_cors_enabled, has_auth_user, has_auth_pass,
-                     has_rate_limit);
+                     has_rate_limit,
+                     has_plugins);
     }
 
     if (!config->root_dir) {
@@ -283,6 +296,10 @@ int main(int argc, char *argv[]) {
     access_log_close();
 
     /* 释放配置文件分配的内存 */
+    /* 释放插件路径 */
+    for (size_t i = 0; i < config.num_plugins; i++) {
+        free((void *)config.plugins[i]);
+    }
     if (config.root_dir) free((void *)config.root_dir);
     if (config.tls_cert) free((void *)config.tls_cert);
     if (config.tls_key) free((void *)config.tls_key);

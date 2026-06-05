@@ -10,3 +10,5 @@ tests/unit/test_multipart
 tests/unit/test_static
 tests/unit/test_server
 tests/fixtures/uploads/
+plugins/*.so
+www/uploads/

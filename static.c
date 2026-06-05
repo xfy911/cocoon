@@ -10,6 +10,7 @@
 
 #include "static.h"
 #include "cocoon.h"
+#include "../coco/include/coco.h"
 #include "tls.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -246,7 +247,20 @@ int send_all(int fd, const char *buf, size_t len) {
 
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n = write(fd, buf + sent, len - sent);
+        ssize_t n;
+        if (coco_sched_get_current() != NULL) {
+            /* 多线程协程模式：使用 coco_write（自动 yield 等待） */
+            int ret = coco_write(fd, buf + sent, len - sent);
+            if (ret < 0) {
+                if (ret == COCO_ERROR_WOULD_BLOCK) {
+                    continue;
+                }
+                return -1;
+            }
+            n = ret;
+        } else {
+            n = write(fd, buf + sent, len - sent);
+        }
         if (n < 0) {
             if (errno == EAGAIN || errno == EINTR) continue;
             return -1;

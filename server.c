@@ -36,6 +36,7 @@
 #include <netinet/tcp.h>
 #include <sys/stat.h>
 #include <stdatomic.h>
+#include <poll.h>
 
 #include "../coco/include/coco.h"
 
@@ -652,32 +653,41 @@ static void client_handler(void *arg) {
     if (!conn) return;
 
     conn->coro = coco_self();
+    log_debug("client_handler 启动 fd=%d", conn->fd);
 
+    log_debug("fd=%d 检查 HTTP/2...", conn->fd);
     /* 检查是否是 HTTP/2 连接（TLS ALPN 协商） */
     if (http2_session_is_http2(conn->fd)) {
+        log_debug("fd=%d 是 HTTP/2 连接", conn->fd);
         handle_http2(conn);
         conn_cancel_timer(conn);
         close_connection(conn);
         free(conn);
         return;
     }
+    log_debug("fd=%d 不是 HTTP/2", conn->fd);
 
     /* 启动空闲定时器 */
+    log_debug("fd=%d 创建定时器...", conn->fd);
     uint32_t timeout_ms = conn->timeout_ms > 0 ? conn->timeout_ms : CONN_TIMEOUT_MS;
     conn->timer = coco_timer(timeout_ms, conn_timeout_handler, conn);
+    log_debug("fd=%d 定时器已创建 timer=%p", conn->fd, (void*)conn->timer);
 
     while (!conn->closed) {
         /* 读取数据 */
         ssize_t n = conn_read(conn);
+        log_debug("fd=%d conn_read 返回 %zd", conn->fd, n);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                /* 数据不足，继续等待 */
+                log_debug("fd=%d EAGAIN，继续等待", conn->fd);
                 continue;
             }
             /* coco_read 返回负值错误码（如 COCO_ERROR_CANCELLED）或系统错误 */
+            log_debug("fd=%d conn_read 错误: %d %s", conn->fd, (int)n, strerror(errno));
             break;
         }
         if (n == 0) {
+            log_debug("fd=%d 对端关闭", conn->fd);
             break; /* 对端关闭 */
         }
 
@@ -744,6 +754,7 @@ static void client_handler(void *arg) {
 
         /* 尝试处理请求 */
         bool keep = handle_request(conn, conn->root_dir);
+        log_debug("fd=%d handle_request 返回 %d", conn->fd, keep);
         if (!keep) {
             break;
         }
@@ -751,6 +762,7 @@ static void client_handler(void *arg) {
 
     conn_cancel_timer(conn);
     close_connection(conn);
+    log_debug("client_handler 结束 fd=%d", conn->fd);
     free(conn);
 }
 
@@ -786,11 +798,36 @@ static void accept_loop(void *arg) {
     log_info("连接空闲超时: %u ms", ctx->config.timeout_ms > 0 ? ctx->config.timeout_ms : CONN_TIMEOUT_MS);
 
     while (ctx->running) {
+        if (ctx->listen_fd < 0) break;
         struct sockaddr_storage client_addr;
         socklen_t addr_len = sizeof(client_addr);
+        int client_fd;
 
-        int client_fd = accept(ctx->listen_fd,
+        if (ctx->config.threaded) {
+            /* 多线程模式：非阻塞 accept + poll 阻塞等待 */
+            client_fd = accept(ctx->listen_fd,
                                (struct sockaddr *)&client_addr, &addr_len);
+            if (client_fd < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                struct pollfd pfd = {
+                    .fd = ctx->listen_fd,
+                    .events = POLLIN
+                };
+                int ret = poll(&pfd, 1, 100);
+                if (ret < 0 && errno != EINTR) {
+                    log_error("poll 失败: %s", strerror(errno));
+                    break;
+                }
+                if (ret > 0 && (pfd.revents & POLLNVAL)) {
+                    break; /* listen_fd 被关闭 */
+                }
+                continue;
+            }
+        } else {
+            /* 单线程模式：标准阻塞 accept */
+            client_fd = accept(ctx->listen_fd,
+                               (struct sockaddr *)&client_addr, &addr_len);
+        }
+
         if (client_fd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
                 continue;
@@ -827,6 +864,11 @@ static void accept_loop(void *arg) {
         /* 设置 TCP_NODELAY 减少延迟 */
         int opt = 1;
         setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+
+        /* 多线程模式下设置 client_fd 非阻塞（用于 coco_read/coco_write） */
+        if (ctx->config.threaded) {
+            set_nonblocking(client_fd);
+        }
 
         /* TLS 握手（如果启用） */
         if (tls_has_context()) {
@@ -875,16 +917,25 @@ static void accept_loop(void *arg) {
         log_debug("新连接 fd=%d，当前活跃连接: %d", client_fd,
                   atomic_load(&g_active_connections));
 
-        if (ctx->config.threaded && coco_sched_get_current()) {
-            /* 多线程协程模式：创建协程处理连接 */
-            coco_coro_t *coro = coco_create(coco_sched_get_current(),
-                                            client_handler, conn, 0);
+        if (ctx->config.threaded) {
+            /* 多线程模式：使用 coco_go_with_opts 创建工作协程，128KB 栈 */
+            coco_go_opts_t opts = {
+                .stack_size = 1024 * 1024,
+                .context = NULL,
+                .priority = -1,
+                .p_id = -1
+            };
+            coco_coro_t *coro = coco_go_with_opts(client_handler, conn, &opts);
             if (!coro) {
-                log_error("创建协程失败，关闭连接 fd=%d", client_fd);
-                atomic_fetch_sub(&g_active_connections, 1);
-                close_connection(conn);
+                log_error("coco_go_with_opts(client_handler) 返回 NULL，无法创建协程 fd=%d", client_fd);
+                http2_session_t *h2 = http2_session_get(client_fd);
+                if (h2) http2_session_destroy(h2);
+                close(client_fd);
                 free(conn);
+                atomic_fetch_sub(&g_active_connections, 1);
+                continue;
             }
+            log_debug("client_handler 协程已创建 coro=%p fd=%d", (void*)coro, client_fd);
         } else {
             /* 单线程模式：直接调用处理函数（阻塞） */
             client_handler(conn);
@@ -952,9 +1003,6 @@ server_context_t *server_create(const cocoon_config_t *config) {
         }
     }
 
-    /* 非阻塞模式 */
-    set_nonblocking(ctx->listen_fd);
-
     return ctx;
 }
 
@@ -984,14 +1032,17 @@ int server_start(server_context_t *ctx) {
             return COCOON_ERROR;
         }
 
-        /* 在调度器上运行 accept 循环 */
-        /* 注意：当前实现使用主线程直接 accept，多线程仅用于工作协程 */
+        /* 多线程模式下 listen_fd 需要非阻塞（用于 accept + poll 等待） */
+        set_nonblocking(ctx->listen_fd);
+
+        /* 在主线程中运行 accept_loop */
         accept_loop(ctx);
 
+        /* 等待所有协程完成 */
         coco_global_sched_wait();
         coco_global_sched_stop();
     } else {
-        /* 单线程模式 */
+        /* 单线程模式：listen_fd 保持阻塞 */
         accept_loop(ctx);
     }
 
@@ -1008,6 +1059,10 @@ int server_start(server_context_t *ctx) {
 void server_stop(server_context_t *ctx) {
     if (ctx) {
         ctx->running = 0;
+        if (ctx->listen_fd >= 0) {
+            close(ctx->listen_fd);
+            ctx->listen_fd = -1;
+        }
     }
 }
 

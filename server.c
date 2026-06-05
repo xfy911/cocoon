@@ -24,6 +24,7 @@
 #include "tls.h"
 #include "http2.h"
 #include "access_log.h"
+#include "websocket.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -634,6 +635,38 @@ static bool is_h2c_upgrade_request(const http_request_t *req) {
 }
 
 /**
+ * is_websocket_upgrade_request - 检查是否是 WebSocket Upgrade 请求
+ *
+ * 检查请求头是否包含 Upgrade: websocket、Connection: Upgrade 和 Sec-WebSocket-Key。
+ *
+ * @param req HTTP 请求
+ * @return true 是 WebSocket 升级请求
+ */
+static bool is_websocket_upgrade_request(const http_request_t *req) {
+    if (strcmp(req->version, "HTTP/1.1") != 0) return false;
+    if (req->method != HTTP_GET) return false;
+
+    bool has_upgrade = false;
+    bool has_connection_upgrade = false;
+    const char *key = NULL;
+
+    for (int i = 0; i < req->num_headers; i++) {
+        if (strcasecmp(req->headers[i].name, "upgrade") == 0) {
+            if (strcasestr(req->headers[i].value, "websocket") != NULL) {
+                has_upgrade = true;
+            }
+        } else if (strcasecmp(req->headers[i].name, "connection") == 0) {
+            if (strcasestr(req->headers[i].value, "upgrade") != NULL) {
+                has_connection_upgrade = true;
+            }
+        } else if (strcasecmp(req->headers[i].name, "sec-websocket-key") == 0) {
+            key = req->headers[i].value;
+        }
+    }
+    return has_upgrade && has_connection_upgrade && key != NULL;
+}
+
+/**
  * send_h2c_upgrade_response - 发送 101 Switching Protocols
  *
  * @param conn 连接上下文
@@ -750,6 +783,31 @@ static void client_handler(void *arg) {
             http_request_free(&req);
             break;
         }
+
+        /* 检查 WebSocket Upgrade 请求 */
+        if (parsed > 0 && is_websocket_upgrade_request(&req)) {
+            const char *key = NULL;
+            for (int i = 0; i < req.num_headers; i++) {
+                if (strcasecmp(req.headers[i].name, "sec-websocket-key") == 0) {
+                    key = req.headers[i].value;
+                    break;
+                }
+            }
+            if (key) {
+                conn_cancel_timer(conn);
+                if (ws_handshake(conn->fd, key) == 0) {
+                    http_request_free(&req);
+                    /* 消费已解析的请求数据 */
+                    if ((size_t)parsed < conn->buf_len) {
+                        memmove(conn->buf, conn->buf + parsed, conn->buf_len - (size_t)parsed);
+                    }
+                    conn->buf_len -= (size_t)parsed;
+                    ws_handle_connection(conn->fd, conn->timeout_ms);
+                    break;
+                }
+            }
+        }
+
         http_request_free(&req);
 
         /* 尝试处理请求 */
@@ -775,6 +833,7 @@ static void client_handler(void *arg) {
  * @param arg 服务器上下文指针
  */
 static void accept_loop(void *arg) {
+    log_debug("=== accept_loop 启动 ===");
     server_context_t *ctx = (server_context_t *)arg;
     if (!ctx) return;
 
@@ -805,6 +864,7 @@ static void accept_loop(void *arg) {
 
         if (ctx->config.threaded) {
             /* 多线程模式：非阻塞 accept + poll 阻塞等待 */
+            log_debug("accept_loop: 尝试 accept()...");
             client_fd = accept(ctx->listen_fd,
                                (struct sockaddr *)&client_addr, &addr_len);
             if (client_fd < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {

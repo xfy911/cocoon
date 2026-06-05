@@ -720,6 +720,21 @@ else
     fail
 fi
 
+# WebSocket 测试
+echo ""
+echo "=== WebSocket 测试 ==="
+
+if python3 "$ROOT/../websocket_test.py" > "$TMPDIR/ws_test.log" 2>&1; then
+    echo "  ✓ WebSocket 握手 + echo — 通过"
+    pass
+    pass
+else
+    echo "  ✗ WebSocket 测试失败"
+    cat "$TMPDIR/ws_test.log"
+    fail
+    fail
+fi
+
 echo ""
 echo "=== 结果汇总 ==="
 echo "通过: $PASS"

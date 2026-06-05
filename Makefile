@@ -20,7 +20,7 @@ PREFIX ?= /usr/local
 BINDIR = $(PREFIX)/bin
 
 # 源文件
-SRCS = main.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c
+SRCS = main.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c
 OBJS = $(SRCS:.c=.o)
 TARGET = cocoon
 
@@ -78,8 +78,8 @@ unit-test: $(UNIT_TEST_BINS)
 	fi
 
 # 单元测试编译规则
-$(UNIT_TEST_DIR)/test_server: $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c $(UNITY_SRC)
-	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c $(UNITY_SRC) $(LDFLAGS)
+$(UNIT_TEST_DIR)/test_server: $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c $(UNITY_SRC) $(LDFLAGS)
 
 $(UNIT_TEST_DIR)/test_multipart: $(UNIT_TEST_DIR)/test_multipart.c multipart.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_multipart.c multipart.c $(UNITY_SRC) -lm

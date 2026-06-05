@@ -19,7 +19,7 @@
 #define COCOON_ERROR       -1   /**< 通用错误 */
 #define COCOON_NOMEM       -2   /**< 内存不足 */
 #define COCOON_NOTFOUND    -3   /**< 文件未找到 */
-#define COCOONForbidden    -4   /**< 禁止访问 */
+#define COCOON_FORBIDDEN    -4   /**< 禁止访问 */
 #define COCOON_BADREQUEST  -5   /**< 请求格式错误 */
 
 /* === 服务器配置 === */
@@ -38,6 +38,10 @@ typedef struct cocoon_config {
     log_level_t log_level;       /**< 日志级别 */
     bool        gzip_enabled;    /**< 是否启用 gzip 压缩（默认 true） */
     bool        brotli_enabled;   /**< 是否启用 brotli 压缩（默认 true） */
+    bool        tls_enabled;     /**< 是否启用 TLS（由 cert/key 自动推断） */
+    const char *tls_cert;        /**< TLS 证书路径 */
+    const char *tls_key;         /**< TLS 私钥路径 */
+    const char *access_log_path; /**< 访问日志文件路径（NULL 或 "-" 表示 stdout） */
 } cocoon_config_t;
 
 /* === 服务器生命周期 API === */

@@ -18,7 +18,9 @@ TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"; kill_server' EXIT
 
 kill_server() {
-    pkill -f "$SERVER.*$HOST" 2>/dev/null || true
+    pkill -f "cocoon.*-p 9999" 2>/dev/null || true
+    pkill -f "cocoon.*--cert" 2>/dev/null || true
+    sleep 0.5
 }
 
 # 启动服务器
@@ -145,7 +147,7 @@ assert_body_contains() {
     local expect="$2"
     local desc="${3:-$url}"
     local body
-    body=$(curl -s "$url")
+    body=$(curl -s -k --compressed "$url")
     if echo "$body" | grep -q "$expect"; then
         echo "  ✓ $desc — 响应体包含 '$expect'"
         pass
@@ -314,6 +316,48 @@ assert_post_form() {
     fi
 }
 
+assert_http2_brotli() {
+    local url="$1"
+    local desc="${2:-$url}"
+    local encoding
+    encoding=$(curl --http2 -k -s -D - -o /dev/null "$url" | grep -i "Content-Encoding:" | tr -d '\r' || true)
+    if echo "$encoding" | grep -qi "br"; then
+        echo "  ✓ $desc — HTTP/2 返回 brotli 压缩"
+        pass
+    else
+        echo "  ✗ $desc — HTTP/2 期望 brotli 压缩, 实际: $encoding"
+        fail
+    fi
+}
+
+assert_http2_gzip() {
+    local url="$1"
+    local desc="${2:-$url}"
+    local encoding
+    encoding=$(curl --http2 -k -s -D - -o /dev/null "$url" | grep -i "Content-Encoding:" | tr -d '\r' || true)
+    if echo "$encoding" | grep -qi "gzip"; then
+        echo "  ✓ $desc — HTTP/2 返回 gzip 压缩"
+        pass
+    else
+        echo "  ✗ $desc — HTTP/2 期望 gzip 压缩, 实际: $encoding"
+        fail
+    fi
+}
+
+assert_http2_not_compressed() {
+    local url="$1"
+    local desc="${2:-$url}"
+    local encoding
+    encoding=$(curl --http2 -k -s -D - -o /dev/null "$url" | grep -i "Content-Encoding:" | tr -d '\r' || true)
+    if [[ -z "$encoding" ]]; then
+        echo "  ✓ $desc — HTTP/2 无压缩"
+        pass
+    else
+        echo "  ✗ $desc — HTTP/2 期望无压缩, 实际: $encoding"
+        fail
+    fi
+}
+
 assert_status_405() {
     local url="$1"
     local desc="${2:-$url}"
@@ -324,6 +368,25 @@ assert_status_405() {
         pass
     else
         echo "  ✗ $desc — 期望 405, 实际 $status"
+        fail
+    fi
+}
+
+assert_access_log() {
+    local log_file="$1"
+    local desc="${2:-访问日志}"
+    if [ -f "$log_file" ] && [ -s "$log_file" ]; then
+        local count
+        count=$(grep -c '"GET /' "$log_file" || true)
+        if [ "$count" -ge 1 ]; then
+            echo "  ✓ $desc — 日志文件包含请求记录"
+            pass
+        else
+            echo "  ✗ $desc — 日志文件无请求记录"
+            fail
+        fi
+    else
+        echo "  ✗ $desc — 日志文件不存在或为空"
         fail
     fi
 }
@@ -410,6 +473,267 @@ assert_status_405 "$BASE/index.html" "PUT 405"
 echo ""
 echo "=== 文件上传测试 ==="
 assert_post_multipart "$BASE/upload" "multipart 文件上传"
+
+echo ""
+echo "=== 访问日志测试 ==="
+# 带访问日志启动服务器
+kill_server
+sleep 1
+LOG_FILE="$TMPDIR/access.log"
+$SERVER -r "$ROOT" -p 9999 --access-log "$LOG_FILE" > "$TMPDIR/server_access.log" 2>&1 &
+pid_access=$!
+for i in {1..30}; do
+    if curl -s -o /dev/null "$BASE/" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+# 发送请求并验证日志记录
+curl -s -o /dev/null "$BASE/index.html" -H "User-Agent: CocoonTest/1.0"
+curl -s -o /dev/null "$BASE/nonexist.html" -H "Referer: http://example.com"
+sleep 0.5
+assert_access_log "$LOG_FILE" "访问日志文件生成"
+# 检查日志格式是否包含关键字段
+if grep -q '"GET /index.html HTTP/1.1"' "$LOG_FILE"; then
+    echo "  ✓ 日志包含 GET /index.html"
+    pass
+else
+    echo "  ✗ 日志缺少 GET /index.html"
+    fail
+fi
+if grep -q 'CocoonTest/1.0' "$LOG_FILE"; then
+    echo "  ✓ 日志包含 User-Agent"
+    pass
+else
+    echo "  ✗ 日志缺少 User-Agent"
+    fail
+fi
+if grep -q 'example.com' "$LOG_FILE"; then
+    echo "  ✓ 日志包含 Referer"
+    pass
+else
+    echo "  ✗ 日志缺少 Referer"
+    fail
+fi
+if grep -q '404' "$LOG_FILE"; then
+    echo "  ✓ 日志包含 404 状态码"
+    pass
+else
+    echo "  ✗ 日志缺少 404 状态码"
+    fail
+fi
+
+# 恢复普通服务器
+kill_server
+sleep 1
+start_server
+
+echo ""
+echo "=== TLS/HTTPS 测试 ==="
+# 启动 HTTPS 服务器（使用测试证书）
+kill_server
+sleep 1
+$SERVER -r "$ROOT" -p 9999 --cert tests/server.crt --key tests/server.key > "$TMPDIR/server_tls.log" 2>&1 &
+pid_tls=$!
+
+# 等待服务器就绪（curl -k 忽略证书验证）
+for i in {1..50}; do
+    if curl -s -o /dev/null -k --max-time 2 "https://$HOST/" 2>/dev/null; then
+        break
+    fi
+    sleep 0.2
+done
+
+# 使用 openssl s_client 验证 TLS 握手
+if command -v openssl >/dev/null 2>&1; then
+    tls_resp=$(echo -e "GET / HTTP/1.1\r\nHost: $HOST\r\nConnection: close\r\n\r\n" | \
+        timeout 5 openssl s_client -connect "$HOST" -quiet 2>/dev/null | head -20)
+    if echo "$tls_resp" | grep -q "HTTP/1.1"; then
+        echo "  ✓ TLS 握手 + HTTP GET — 通过 HTTPS 获取响应"
+        pass
+    else
+        echo "  ✗ TLS 握手 + HTTP GET — 未能通过 HTTPS 获取响应"
+        fail
+    fi
+else
+    echo "  ⚠ openssl 未安装，跳过 TLS 握手验证"
+fi
+
+# 使用 curl -k 验证 HTTPS 响应体
+assert_body_contains "https://$HOST/" "Cocoon" "HTTPS 首页响应"
+
+echo ""
+echo "=== HTTP/2 测试 ==="
+# 使用已启动的 TLS 服务器测试 HTTP/2（ALPN 协商）
+kill_server
+sleep 1
+$SERVER -r "$ROOT" -p 9999 --cert tests/server.crt --key tests/server.key > "$TMPDIR/server_h2.log" 2>&1 &
+pid_h2=$!
+
+# 等待服务器就绪
+for i in {1..50}; do
+    if curl -s -o /dev/null -k --max-time 2 "https://$HOST/" 2>/dev/null; then
+        break
+    fi
+    sleep 0.2
+done
+
+# 验证 HTTP/2 协议版本
+h2_version=$(curl --http2 -k -s -o /dev/null -w "%{http_version}" "https://$HOST/")
+if [[ "$h2_version" == "2" ]]; then
+    echo "  ✓ HTTP/2 ALPN 协商 — 协议版本 HTTP/2"
+    pass
+else
+    echo "  ✗ HTTP/2 ALPN 协商 — 期望 HTTP/2, 实际 HTTP/$h2_version"
+    fail
+fi
+
+# HTTP/2 GET 首页
+h2_status=$(curl --http2 -k -s -o /dev/null -w "%{http_code}" "https://$HOST/")
+if [[ "$h2_status" == "200" ]]; then
+    echo "  ✓ HTTP/2 GET 首页 — HTTP 200"
+    pass
+else
+    echo "  ✗ HTTP/2 GET 首页 — 期望 200, 实际 $h2_status"
+    fail
+fi
+
+# HTTP/2 响应体
+h2_body=$(curl --http2 -k -s --compressed "https://$HOST/")
+if echo "$h2_body" | grep -q "Cocoon"; then
+    echo "  ✓ HTTP/2 响应体 — 包含 'Cocoon'"
+    pass
+else
+    echo "  ✗ HTTP/2 响应体 — 未包含 'Cocoon'"
+    fail
+fi
+
+# HTTP/2 HEAD 请求
+h2_head_status=$(curl --http2 -k -s -o /dev/null -w "%{http_code}" -I "https://$HOST/index.html")
+if [[ "$h2_head_status" == "200" ]]; then
+    echo "  ✓ HTTP/2 HEAD 请求 — HTTP 200"
+    pass
+else
+    echo "  ✗ HTTP/2 HEAD 请求 — 期望 200, 实际 $h2_head_status"
+    fail
+fi
+
+# HTTP/2 404
+h2_404=$(curl --http2 -k -s -o /dev/null -w "%{http_code}" "https://$HOST/nonexist.html")
+if [[ "$h2_404" == "404" ]]; then
+    echo "  ✓ HTTP/2 404 请求 — HTTP 404"
+    pass
+else
+    echo "  ✗ HTTP/2 404 请求 — 期望 404, 实际 $h2_404"
+    fail
+fi
+
+# HTTP/2 缓存协商（ETag 304）
+H2_ETAG=$(curl --http2 -k -sI "https://$HOST/index.html" | grep -i "ETag:" | awk '{print $2}' | tr -d '\r')
+if [[ -n "$H2_ETAG" ]]; then
+    h2_304=$(curl --http2 -k -s -o /dev/null -w "%{http_code}" -H "If-None-Match: $H2_ETAG" "https://$HOST/index.html")
+    if [[ "$h2_304" == "304" ]]; then
+        echo "  ✓ HTTP/2 If-None-Match 304 — 缓存命中"
+        pass
+    else
+        echo "  ✗ HTTP/2 If-None-Match 304 — 期望 304, 实际 $h2_304"
+        fail
+    fi
+fi
+
+# HTTP/2 压缩测试
+assert_http2_brotli "https://$HOST/index.html" "HTTP/2 HTML brotli"
+assert_http2_brotli "https://$HOST/style.css" "HTTP/2 CSS brotli"
+assert_http2_brotli "https://$HOST/app.js" "HTTP/2 JS brotli"
+
+# HTTP/2 目录浏览测试
+h2_dir_status=$(curl --http2 -k -s -o /dev/null -w "%{http_code}" "https://$HOST/subdir/")
+h2_dir_body=$(curl --http2 -k -s "https://$HOST/subdir/")
+if [[ "$h2_dir_status" == "200" ]] && echo "$h2_dir_body" | grep -q "page.html"; then
+    echo "  ✓ HTTP/2 目录浏览 — HTTP 200，包含 page.html"
+    pass
+else
+    echo "  ✗ HTTP/2 目录浏览 — 期望 200+page.html, 实际 $h2_dir_status"
+    fail
+fi
+
+# 停止 HTTP/2 服务器，恢复 HTTP 服务器
+kill_server
+sleep 1
+start_server
+
+# h2c 测试（明文 HTTP/2）
+echo ""
+echo "=== h2c 测试 ==="
+
+# h2c prior knowledge 直接连接
+h2c_pk_status=$(curl --http2-prior-knowledge -s -o /dev/null -w "%{http_code}" "http://$HOST/")
+h2c_pk_version=$(curl --http2-prior-knowledge -s -o /dev/null -w "%{http_version}" "http://$HOST/")
+if [[ "$h2c_pk_status" == "200" && "$h2c_pk_version" == "2" ]]; then
+    echo "  ✓ h2c prior knowledge — HTTP 200, 协议 HTTP/2"
+    pass
+else
+    echo "  ✗ h2c prior knowledge — 期望 200+HTTP/2, 实际 $h2c_pk_status+HTTP/$h2c_pk_version"
+    fail
+fi
+
+# h2c prior knowledge 404
+h2c_pk_404=$(curl --http2-prior-knowledge -s -o /dev/null -w "%{http_code}" "http://$HOST/nonexist.html")
+if [[ "$h2c_pk_404" == "404" ]]; then
+    echo "  ✓ h2c prior knowledge 404 — HTTP 404"
+    pass
+else
+    echo "  ✗ h2c prior knowledge 404 — 期望 404, 实际 $h2c_pk_404"
+    fail
+fi
+
+# h2c Upgrade 协商
+h2c_up_status=$(curl --http2 -s -o /dev/null -w "%{http_code}" "http://$HOST/")
+h2c_up_version=$(curl --http2 -s -o /dev/null -w "%{http_version}" "http://$HOST/")
+if [[ "$h2c_up_status" == "200" && "$h2c_up_version" == "2" ]]; then
+    echo "  ✓ h2c Upgrade 协商 — HTTP 200, 协议 HTTP/2"
+    pass
+else
+    echo "  ✗ h2c Upgrade 协商 — 期望 200+HTTP/2, 实际 $h2c_up_status+HTTP/$h2c_up_version"
+    fail
+fi
+
+# h2c Upgrade 404
+h2c_up_404=$(curl --http2 -s -o /dev/null -w "%{http_code}" "http://$HOST/nonexist.html")
+if [[ "$h2c_up_404" == "404" ]]; then
+    echo "  ✓ h2c Upgrade 404 — HTTP 404"
+    pass
+else
+    echo "  ✗ h2c Upgrade 404 — 期望 404, 实际 $h2c_up_404"
+    fail
+fi
+
+# HTTP/2 目录浏览测试
+# subdir 目录没有 index.html，应返回 200 目录列表
+h2c_dir_status=$(curl --http2-prior-knowledge -s -o /dev/null -w "%{http_code}" "http://$HOST/subdir/")
+h2c_dir_body=$(curl --http2-prior-knowledge -s "http://$HOST/subdir/")
+if [[ "$h2c_dir_status" == "200" ]] && echo "$h2c_dir_body" | grep -q "page.html"; then
+    echo "  ✓ h2c 目录浏览 — HTTP 200，包含 page.html"
+    pass
+else
+    echo "  ✗ h2c 目录浏览 — 期望 200+page.html, 实际 $h2c_dir_status"
+    fail
+fi
+
+# WebSocket 测试
+echo ""
+echo "=== WebSocket 测试 ==="
+
+if python3 "$ROOT/../websocket_test.py" > "$TMPDIR/ws_test.log" 2>&1; then
+    echo "  ✓ WebSocket 握手 + echo — 通过"
+    pass
+    pass
+else
+    echo "  ✗ WebSocket 测试失败"
+    cat "$TMPDIR/ws_test.log"
+    fail
+    fail
+fi
 
 echo ""
 echo "=== 结果汇总 ==="

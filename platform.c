@@ -14,9 +14,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 /* ========== POSIX 实现 ========== */
 #ifdef COCOON_PLATFORM_POSIX
+
+#include <fcntl.h>      /* O_NONBLOCK */
+#include <unistd.h>     /* close, read, write, lseek, dup2 */
+#include <dirent.h>     /* opendir, readdir, closedir */
+#include <errno.h>      /* errno, EAGAIN, EINTR */
+#include <sys/sendfile.h> /* sendfile */
+#include <signal.h>     /* sigaction */
+#include <sys/socket.h> /* send */
 
 /**
  * POSIX socket 子系统无需显式初始化。

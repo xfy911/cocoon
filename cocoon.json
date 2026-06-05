@@ -7,5 +7,6 @@
     "timeout_ms": 30000,
     "log_level": "info",
     "gzip_enabled": true,
-    "brotli_enabled": true
+    "brotli_enabled": true,
+    "access_log": "-"
 }

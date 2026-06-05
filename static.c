@@ -11,6 +11,8 @@
 #include "static.h"
 #include "cocoon.h"
 #include "platform.h"
+#include "../coco/include/coco.h"
+#include "tls.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -235,9 +237,27 @@ static bool safe_path_join(char *dst, size_t dst_size,
  * @return 0 鎴愬姛锛?1 澶辫触
  */
 int send_all(int fd, const char *buf, size_t len) {
+    if (tls_has_connection(fd)) {
+        return tls_write(fd, buf, len) == (ssize_t)len ? 0 : -1;
+    }
+
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n = cocoon_socket_send(fd, buf + sent, len - sent);
+        ssize_t n;
+        if (tls_has_connection(fd)) {
+            n = tls_write(fd, buf + sent, len - sent);
+        } else if (coco_sched_get_current() != NULL) {
+            int ret = coco_write(fd, buf + sent, len - sent);
+            if (ret < 0) {
+                if (ret == COCO_ERROR_WOULD_BLOCK) {
+                    continue;
+                }
+                return -1;
+            }
+            n = ret;
+        } else {
+            n = cocoon_socket_send(fd, buf + sent, len - sent);
+        }
         if (n < 0) {
             int err = cocoon_get_last_error();
             if (err == EAGAIN || err == EINTR) continue;
@@ -467,10 +487,25 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir, b
         return COCOON_OK;
     }
 
-    if (use_gzip || use_brotli) {
-        /* 鍙戦€佸帇缂╁悗鐨勬暟鎹?*/
-        send_all(fd, compress_buf, (size_t)compress_len);
-        free(compress_buf);
+    if (use_gzip || use_brotli || tls_has_connection(fd)) {
+        /* 发送压缩后的数据，或 TLS 模式下的文件内容 */
+        if (use_gzip || use_brotli) {
+            send_all(fd, compress_buf, (size_t)compress_len);
+            free(compress_buf);
+        } else {
+            /* 定位到起始位置（文件可能已被压缩读取提前读至末尾） */
+            cocoon_file_seek(file_fd, send_start, SEEK_SET);
+            /* TLS 模式：不能使用 sendfile，需读取文件后发送 */
+            char file_buf[65536];
+            ssize_t remaining = send_length;
+            while (remaining > 0) {
+                size_t to_read = (size_t)remaining < sizeof(file_buf) ? (size_t)remaining : sizeof(file_buf);
+                ssize_t n = cocoon_file_read(file_fd, file_buf, to_read);
+                if (n <= 0) break;
+                if (send_all(fd, file_buf, (size_t)n) != 0) break;
+                remaining -= n;
+            }
+        }
         cocoon_file_close(file_fd);
     } else {
         /* 浣跨敤璺ㄥ钩鍙版枃浠跺彂閫侊紙Linux sendfile / Windows read+send锛?*/

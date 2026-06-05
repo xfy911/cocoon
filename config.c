@@ -274,6 +274,27 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
         } else if (strcmp(key_str, "brotli_enabled") == 0) {
             if (val.type == TOKEN_TRUE) config->brotli_enabled = true;
             else if (val.type == TOKEN_FALSE) config->brotli_enabled = false;
+        } else if (strcmp(key_str, "tls_cert") == 0 && val.type == TOKEN_STRING) {
+            char *v = token_str_dup(&val);
+            if (v) {
+                free((void *)config->tls_cert);
+                config->tls_cert = v;
+            }
+        } else if (strcmp(key_str, "tls_key") == 0 && val.type == TOKEN_STRING) {
+            char *v = token_str_dup(&val);
+            if (v) {
+                free((void *)config->tls_key);
+                config->tls_key = v;
+            }
+        } else if (strcmp(key_str, "tls_enabled") == 0) {
+            if (val.type == TOKEN_TRUE) config->tls_enabled = true;
+            else if (val.type == TOKEN_FALSE) config->tls_enabled = false;
+        } else if (strcmp(key_str, "access_log") == 0 && val.type == TOKEN_STRING) {
+            char *v = token_str_dup(&val);
+            if (v) {
+                free((void *)config->access_log_path);
+                config->access_log_path = v;
+            }
         }
         /* 其他字段：忽略（未来扩展预留） */
 
@@ -296,7 +317,9 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
 void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
                   bool has_root_dir, bool has_port, bool has_workers,
                   bool has_max_conn, bool has_timeout, bool has_log_level,
-                  bool has_gzip_enabled, bool has_brotli_enabled) {
+                  bool has_gzip_enabled, bool has_brotli_enabled,
+                  bool has_tls_cert, bool has_tls_key, bool has_tls_enabled,
+                  bool has_access_log) {
     if (!base || !cmdline) return;
 
     /* 命令行显式指定的值覆盖配置文件 */
@@ -311,6 +334,19 @@ void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
     if (has_log_level) base->log_level = cmdline->log_level;
     if (has_gzip_enabled) base->gzip_enabled = cmdline->gzip_enabled;
     if (has_brotli_enabled) base->brotli_enabled = cmdline->brotli_enabled;
+    if (has_tls_cert && cmdline->tls_cert) {
+        free((void *)base->tls_cert);
+        base->tls_cert = strdup(cmdline->tls_cert);
+    }
+    if (has_tls_key && cmdline->tls_key) {
+        free((void *)base->tls_key);
+        base->tls_key = strdup(cmdline->tls_key);
+    }
+    if (has_tls_enabled) base->tls_enabled = cmdline->tls_enabled;
+    if (has_access_log && cmdline->access_log_path) {
+        free((void *)base->access_log_path);
+        base->access_log_path = strdup(cmdline->access_log_path);
+    }
     /* threaded 是 flag 参数，命令行指定了就用命令行的 */
     if (cmdline->threaded) base->threaded = true;
 }

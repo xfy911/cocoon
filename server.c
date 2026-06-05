@@ -21,11 +21,16 @@
 #include "cocoon.h"
 #include "log.h"
 #include "multipart.h"
+#include "tls.h"
+#include "http2.h"
+#include "access_log.h"
+#include "websocket.h"
 #include "platform.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <poll.h>
 
 #include "coco.h"
 
@@ -37,7 +42,7 @@
 /**
  * connection_t - 单个客户端连接上下文
  *
- * 包含 socket fd、接收缓冲区、解析状态、超时管理。
+ * 包含 socket fd、接收缓冲区、解析状态、超时管理、客户端地址、响应状态。
  */
 typedef struct {
     cocoon_socket_t fd;             /**< 客户端 socket */
@@ -51,6 +56,9 @@ typedef struct {
     coco_coro_t    *coro;           /**< 当前处理协程 */
     bool        gzip_enabled;    /**< 是否启用 gzip 压缩 */
     bool        brotli_enabled;  /**< 是否启用 brotli 压缩 */
+    struct sockaddr_storage client_addr; /**< 客户端地址 */
+    socklen_t       addr_len;       /**< 地址长度 */
+    int             response_status; /**< 最后响应的 HTTP 状态码 */
 } connection_t;
 struct server_context {
     cocoon_socket_t     listen_fd;    /**< 监听 socket */
@@ -80,6 +88,7 @@ static void set_nonblocking(cocoon_socket_t fd) {
  */
 static void close_connection(connection_t *conn) {
     if (conn && conn->fd != COCOON_INVALID_SOCKET) {
+        tls_close(conn->fd);
         cocoon_socket_close(conn->fd);
         conn->fd = COCOON_INVALID_SOCKET;
         conn->closed = true;
@@ -104,8 +113,9 @@ static ssize_t conn_read(connection_t *conn) {
 
     ssize_t n;
 
-    /* 尝试使用 coco 的异步 I/O */
-    if (coco_sched_get_current() != NULL) {
+    if (tls_has_connection(conn->fd)) {
+        n = tls_read(conn->fd, conn->buf + conn->buf_len, space);
+    } else if (coco_sched_get_current() != NULL) {
         n = coco_read(conn->fd, conn->buf + conn->buf_len, space);
     } else {
         /* 无调度器时直接 read */
@@ -156,7 +166,9 @@ static int conn_read_body(connection_t *conn, http_request_t *req, size_t need) 
     /* 从 socket 读取剩余数据 */
     while (got < need) {
         ssize_t n;
-        if (coco_sched_get_current() != NULL) {
+        if (tls_has_connection(conn->fd)) {
+            n = tls_read(conn->fd, req->body + got, need - got);
+        } else if (coco_sched_get_current() != NULL) {
             n = coco_read(conn->fd, req->body + got, need - got);
         } else {
             n = cocoon_socket_recv(conn->fd, req->body + got, need - got);
@@ -322,6 +334,7 @@ static bool handle_post_request(int fd, const http_request_t *req, const char *r
  *
  * 从缓冲区解析请求，判断是文件还是目录，调用对应的服务函数。
  * 新增：支持 POST 请求体读取和简单回显。
+ * 新增：记录响应状态码到访问日志。
  *
  * @param conn 连接上下文
  * @param root_dir 静态资源根目录
@@ -337,7 +350,10 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
             return true;
         }
         /* 格式错误 */
+        conn->response_status = 400;
         static_send_error(conn->fd, 400, false);
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, -1);
         return false;
     }
 
@@ -351,7 +367,11 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     if (req.content_length > 0) {
         size_t need = (size_t)req.content_length;
         if (conn_read_body(conn, &req, need) != 0) {
+            conn->response_status = 413;
             static_send_error(conn->fd, 413, req.keep_alive); /* Payload Too Large */
+            access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                             &req, conn->response_status, -1);
+            http_request_free(&req);
             return req.keep_alive;
         }
     }
@@ -359,13 +379,19 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     /* 处理 POST */
     if (req.method == HTTP_POST) {
         bool keep = handle_post_request(conn->fd, &req, conn->root_dir);
+        conn->response_status = 200; /* POST 目前总是返回 200 */
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, -1);
         http_request_free(&req);
         return keep;
     }
 
     /* 只支持 GET 和 HEAD */
     if (req.method != HTTP_GET && req.method != HTTP_HEAD) {
+        conn->response_status = 405;
         static_send_error(conn->fd, 405, req.keep_alive);
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, -1);
         http_request_free(&req);
         return req.keep_alive;
     }
@@ -380,7 +406,10 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
 
     int n = snprintf(real_path, sizeof(real_path), "%s%s", root_normalized, req.path);
     if (n < 0 || (size_t)n >= sizeof(real_path)) {
+        conn->response_status = 400;
         static_send_error(conn->fd, 400, req.keep_alive);
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, -1);
         http_request_free(&req);
         return req.keep_alive;
     }
@@ -390,7 +419,10 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         char resolved[4096];
         if (!cocoon_realpath(real_path, resolved, sizeof(resolved)) ||
             strncmp(resolved, root_normalized, strlen(root_normalized)) != 0) {
+            conn->response_status = 403;
             static_send_error(conn->fd, 403, req.keep_alive);
+            access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                             &req, conn->response_status, -1);
             http_request_free(&req);
             return req.keep_alive;
         }
@@ -400,7 +432,10 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     /* 判断文件类型 */
     cocoon_stat_t st;
     if (cocoon_file_stat(real_path, &st) != 0) {
+        conn->response_status = 404;
         static_send_error(conn->fd, 404, req.keep_alive);
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, -1);
         http_request_free(&req);
         return req.keep_alive;
     }
@@ -409,7 +444,10 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         /* 目录：尝试 index.html */
         char index_path[4096];
         if (snprintf(index_path, sizeof(index_path), "%s/index.html", real_path) >= (int)sizeof(index_path)) {
+            conn->response_status = 400;
             static_send_error(conn->fd, 400, req.keep_alive);
+            access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                             &req, conn->response_status, -1);
             http_request_free(&req);
             return req.keep_alive;
         }
@@ -418,22 +456,31 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
             /* 有 index.html，作为文件服务 */
             http_request_t index_req = req;
             if (snprintf(index_req.path, sizeof(index_req.path), "%s/index.html", req.path) >= (int)sizeof(index_req.path)) {
+                conn->response_status = 400;
                 static_send_error(conn->fd, 400, req.keep_alive);
+                access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                                 &req, conn->response_status, -1);
                 http_request_free(&req);
                 return req.keep_alive;
             }
+            conn->response_status = 200;
             static_serve_file(conn->fd, &index_req, root_dir, conn->gzip_enabled, conn->brotli_enabled);
         } else {
             /* 无 index.html，生成目录列表 */
+            conn->response_status = 200;
             static_serve_directory(conn->fd, &req, root_dir, real_path);
         }
     } else if (cocoon_stat_isreg(&st)) {
         /* 普通文件 */
+        conn->response_status = 200;
         static_serve_file(conn->fd, &req, root_dir, conn->gzip_enabled, conn->brotli_enabled);
     } else {
+        conn->response_status = 403;
         static_send_error(conn->fd, 403, req.keep_alive);
     }
 
+    access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                     &req, conn->response_status, -1);
     http_request_free(&req);
     return req.keep_alive;
 }
@@ -498,36 +545,267 @@ static void conn_cancel_timer(connection_t *conn) {
  *
  * @param arg 连接上下文指针（connection_t*）
  */
+/**
+ * handle_http2 - 处理 HTTP/2 连接
+ *
+ * 使用 nghttp2 库处理 HTTP/2 帧，服务静态资源。
+ *
+ * @param conn 连接上下文
+ */
+static void handle_http2(connection_t *conn) {
+    http2_session_t *h2 = http2_session_get(conn->fd);
+    if (!h2) return;
+    http2_session_set_context(h2, conn->root_dir, conn->gzip_enabled, conn->brotli_enabled);
+
+    uint32_t timeout_ms = conn->timeout_ms > 0 ? conn->timeout_ms : CONN_TIMEOUT_MS;
+
+    while (!conn->closed && http2_want_read(h2)) {
+        /* 读取数据 */
+        char buf[8192];
+        ssize_t n;
+        if (tls_has_connection(conn->fd)) {
+            n = tls_read(conn->fd, buf, sizeof(buf));
+        } else if (coco_sched_get_current() != NULL) {
+            n = coco_read(conn->fd, buf, sizeof(buf));
+        } else {
+            n = read(conn->fd, buf, sizeof(buf));
+        }
+
+        if (n > 0) {
+            conn_reset_timer(conn, timeout_ms);
+            if (http2_recv(h2, (const uint8_t *)buf, (size_t)n) != 0) {
+                log_debug("HTTP/2 接收错误 fd=%d", conn->fd);
+                break;
+            }
+        } else if (n == 0) {
+            break; /* 对端关闭 */
+        } else {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+
+        /* 发送挂起的帧 */
+        if (http2_want_write(h2)) {
+            if (http2_send_pending(h2) != 0) {
+                break;
+            }
+        }
+    }
+
+    http2_session_destroy(h2);
+}
+
+/* HTTP/2 h2c 连接前言（24字节） */
+static const char H2C_PREFACE[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+#define H2C_PREFACE_LEN 24
+
+/**
+ * is_h2c_upgrade_request - 检查是否是 HTTP/1.1 Upgrade: h2c 请求
+ *
+ * @param req HTTP 请求
+ * @return true 是 h2c 升级请求
+ */
+static bool is_h2c_upgrade_request(const http_request_t *req) {
+    if (strcmp(req->version, "HTTP/1.1") != 0) return false;
+
+    bool has_upgrade = false;
+    bool has_connection_upgrade = false;
+
+    for (int i = 0; i < req->num_headers; i++) {
+        if (strcasecmp(req->headers[i].name, "upgrade") == 0) {
+            if (strcasestr(req->headers[i].value, "h2c") != NULL) {
+                has_upgrade = true;
+            }
+        } else if (strcasecmp(req->headers[i].name, "connection") == 0) {
+            if (strcasestr(req->headers[i].value, "upgrade") != NULL) {
+                has_connection_upgrade = true;
+            }
+        }
+    }
+    return has_upgrade && has_connection_upgrade;
+}
+
+/**
+ * is_websocket_upgrade_request - 检查是否是 WebSocket Upgrade 请求
+ *
+ * 检查请求头是否包含 Upgrade: websocket、Connection: Upgrade 和 Sec-WebSocket-Key。
+ *
+ * @param req HTTP 请求
+ * @return true 是 WebSocket 升级请求
+ */
+static bool is_websocket_upgrade_request(const http_request_t *req) {
+    if (strcmp(req->version, "HTTP/1.1") != 0) return false;
+    if (req->method != HTTP_GET) return false;
+
+    bool has_upgrade = false;
+    bool has_connection_upgrade = false;
+    const char *key = NULL;
+
+    for (int i = 0; i < req->num_headers; i++) {
+        if (strcasecmp(req->headers[i].name, "upgrade") == 0) {
+            if (strcasestr(req->headers[i].value, "websocket") != NULL) {
+                has_upgrade = true;
+            }
+        } else if (strcasecmp(req->headers[i].name, "connection") == 0) {
+            if (strcasestr(req->headers[i].value, "upgrade") != NULL) {
+                has_connection_upgrade = true;
+            }
+        } else if (strcasecmp(req->headers[i].name, "sec-websocket-key") == 0) {
+            key = req->headers[i].value;
+        }
+    }
+    return has_upgrade && has_connection_upgrade && key != NULL;
+}
+
+/**
+ * send_h2c_upgrade_response - 发送 101 Switching Protocols
+ *
+ * @param conn 连接上下文
+ * @return true 发送成功
+ */
+static bool send_h2c_upgrade_response(connection_t *conn) {
+    const char *resp =
+        "HTTP/1.1 101 Switching Protocols\r\n"
+        "Connection: Upgrade\r\n"
+        "Upgrade: h2c\r\n"
+        "\r\n";
+    return send_all(conn->fd, resp, strlen(resp)) == 0;
+}
+
 static void client_handler(void *arg) {
     connection_t *conn = (connection_t *)arg;
     if (!conn) return;
 
     conn->coro = coco_self();
+    log_debug("client_handler 启动 fd=%d", conn->fd);
+
+    log_debug("fd=%d 检查 HTTP/2...", conn->fd);
+    /* 检查是否是 HTTP/2 连接（TLS ALPN 协商） */
+    if (http2_session_is_http2(conn->fd)) {
+        log_debug("fd=%d 是 HTTP/2 连接", conn->fd);
+        handle_http2(conn);
+        conn_cancel_timer(conn);
+        close_connection(conn);
+        free(conn);
+        return;
+    }
+    log_debug("fd=%d 不是 HTTP/2", conn->fd);
 
     /* 启动空闲定时器 */
+    log_debug("fd=%d 创建定时器...", conn->fd);
     uint32_t timeout_ms = conn->timeout_ms > 0 ? conn->timeout_ms : CONN_TIMEOUT_MS;
     conn->timer = coco_timer(timeout_ms, conn_timeout_handler, conn);
+    log_debug("fd=%d 定时器已创建 timer=%p", conn->fd, (void*)conn->timer);
 
     while (!conn->closed) {
         /* 读取数据 */
         ssize_t n = conn_read(conn);
+        log_debug("fd=%d conn_read 返回 %zd", conn->fd, n);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                /* 数据不足，继续等待 */
+                log_debug("fd=%d EAGAIN，继续等待", conn->fd);
                 continue;
             }
             /* coco_read 返回负值错误码（如 COCO_ERROR_CANCELLED）或系统错误 */
+            log_debug("fd=%d conn_read 错误: %d %s", conn->fd, (int)n, strerror(errno));
             break;
         }
         if (n == 0) {
+            log_debug("fd=%d 对端关闭", conn->fd);
             break; /* 对端关闭 */
         }
 
         /* 有数据读取，重置定时器 */
         conn_reset_timer(conn, timeout_ms);
 
+        /* 检查 h2c 直接连接前言 */
+        if (conn->buf_len >= H2C_PREFACE_LEN &&
+            memcmp(conn->buf, H2C_PREFACE, H2C_PREFACE_LEN) == 0) {
+            log_debug("fd=%d 检测到 h2c 直接连接前言", conn->fd);
+            http2_session_t *h2 = http2_session_create(conn->fd, false);
+            if (h2) {
+                http2_session_set_context(h2, conn->root_dir,
+                                          conn->gzip_enabled,
+                                          conn->brotli_enabled);
+                if (http2_send_pending(h2) == 0) {
+                    if (http2_recv(h2, (const uint8_t *)conn->buf, conn->buf_len) == 0) {
+                        conn->buf_len = 0;
+                        handle_http2(conn);
+                        break; /* handle_http2 内部已销毁会话 */
+                    }
+                }
+                http2_session_destroy(h2);
+            }
+            break;
+        }
+
+        /* 检查 HTTP/1.1 Upgrade: h2c 请求 */
+        http_request_t req;
+        int parsed = http_parse_request(conn->buf, conn->buf_len, &req);
+        if (parsed > 0 && is_h2c_upgrade_request(&req)) {
+            /* 消费已解析的 HTTP/1.1 请求数据 */
+            if ((size_t)parsed < conn->buf_len) {
+                memmove(conn->buf, conn->buf + parsed, conn->buf_len - (size_t)parsed);
+            }
+            conn->buf_len -= (size_t)parsed;
+
+            if (send_h2c_upgrade_response(conn)) {
+                http2_session_t *h2 = http2_session_create(conn->fd, false);
+                if (h2) {
+                    http2_session_set_context(h2, conn->root_dir,
+                                              conn->gzip_enabled,
+                                              conn->brotli_enabled);
+                    if (http2_send_pending(h2) == 0) {
+                        if (http2_session_upgrade(h2, &req) == 0) {
+                            if (http2_send_pending(h2) == 0) {
+                                /* 消费缓冲区中的剩余数据 */
+                                if (conn->buf_len > 0) {
+                                    http2_recv(h2, (const uint8_t *)conn->buf, conn->buf_len);
+                                    conn->buf_len = 0;
+                                }
+                                handle_http2(conn);
+                                break; /* handle_http2 内部已销毁会话 */
+                            }
+                        }
+                        http2_session_destroy(h2);
+                    }
+                }
+            }
+            http_request_free(&req);
+            break;
+        }
+
+        /* 检查 WebSocket Upgrade 请求 */
+        if (parsed > 0 && is_websocket_upgrade_request(&req)) {
+            const char *key = NULL;
+            for (int i = 0; i < req.num_headers; i++) {
+                if (strcasecmp(req.headers[i].name, "sec-websocket-key") == 0) {
+                    key = req.headers[i].value;
+                    break;
+                }
+            }
+            if (key) {
+                conn_cancel_timer(conn);
+                if (ws_handshake(conn->fd, key) == 0) {
+                    http_request_free(&req);
+                    /* 消费已解析的请求数据 */
+                    if ((size_t)parsed < conn->buf_len) {
+                        memmove(conn->buf, conn->buf + parsed, conn->buf_len - (size_t)parsed);
+                    }
+                    conn->buf_len -= (size_t)parsed;
+                    ws_handle_connection(conn->fd, conn->timeout_ms);
+                    break;
+                }
+            }
+        }
+
+        http_request_free(&req);
+
         /* 尝试处理请求 */
         bool keep = handle_request(conn, conn->root_dir);
+        log_debug("fd=%d handle_request 返回 %d", conn->fd, keep);
         if (!keep) {
             break;
         }
@@ -535,6 +813,7 @@ static void client_handler(void *arg) {
 
     conn_cancel_timer(conn);
     close_connection(conn);
+    log_debug("client_handler 结束 fd=%d", conn->fd);
     free(conn);
 }
 
@@ -547,6 +826,7 @@ static void client_handler(void *arg) {
  * @param arg 服务器上下文指针
  */
 static void accept_loop(void *arg) {
+    log_debug("=== accept_loop 启动 ===");
     server_context_t *ctx = (server_context_t *)arg;
     if (!ctx) return;
 
@@ -570,14 +850,14 @@ static void accept_loop(void *arg) {
     log_info("连接空闲超时: %u ms", ctx->config.timeout_ms > 0 ? ctx->config.timeout_ms : CONN_TIMEOUT_MS);
 
     while (ctx->running) {
-        struct sockaddr_in client_addr;
+        if (ctx->listen_fd < 0) break;
+        struct sockaddr_storage client_addr;
         socklen_t addr_len = sizeof(client_addr);
-
         cocoon_socket_t client_fd = accept(ctx->listen_fd,
                                (struct sockaddr *)&client_addr, &addr_len);
         if (client_fd == COCOON_INVALID_SOCKET) {
             int err = cocoon_get_last_error();
-            if (err == EAGAIN || err == EWOULDBLOCK || err == EINTR) {
+            if (err == EAGAIN || err == EINTR) {
                 continue;
             }
             log_error("accept 失败: %s", cocoon_strerror(err));
@@ -594,8 +874,16 @@ static void accept_loop(void *arg) {
                 const char *resp = "HTTP/1.1 503 Service Unavailable\r\n"
                                      "Content-Length: 0\r\n"
                                      "Connection: close\r\n\r\n";
-                cocoon_socket_send(client_fd, resp, strlen(resp));
-                cocoon_socket_close(client_fd);
+                if (tls_has_context()) {
+                    if (tls_accept(client_fd) == 0) {
+                        tls_write(client_fd, resp, strlen(resp));
+                        tls_close(client_fd);
+                    }
+                    cocoon_socket_close(client_fd);
+                } else {
+                    cocoon_socket_send(client_fd, resp, strlen(resp));
+                    cocoon_socket_close(client_fd);
+                }
                 continue;
             }
         }
@@ -604,10 +892,41 @@ static void accept_loop(void *arg) {
         int opt = 1;
         setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&opt, sizeof(opt));
 
+        /* 多线程模式下设置 client_fd 非阻塞（用于 coco_read/coco_write） */
+        if (ctx->config.threaded) {
+            set_nonblocking(client_fd);
+        }
+
+        /* TLS 握手（如果启用） */
+        if (tls_has_context()) {
+            if (tls_accept(client_fd) != 0) {
+                log_warn("TLS 握手失败 fd=%d，关闭连接", client_fd);
+                cocoon_socket_close(client_fd);
+                continue;
+            }
+            /* 检查 ALPN 协商结果，创建 HTTP/2 会话 */
+            if (tls_negotiated_http2(client_fd)) {
+                log_debug("fd=%d ALPN 协商为 HTTP/2", client_fd);
+                if (http2_on_connection_accepted(client_fd, true) != 0) {
+                    log_warn("HTTP/2 会话创建失败 fd=%d", client_fd);
+                    cocoon_socket_close(client_fd);
+                    continue;
+                }
+                http2_session_t *h2 = http2_session_get(client_fd);
+                if (h2) {
+                    http2_session_set_context(h2, ctx->config.root_dir,
+                                              ctx->config.gzip_enabled,
+                                              ctx->config.brotli_enabled);
+                }
+            }
+        }
+
         /* 创建连接上下文 */
         connection_t *conn = (connection_t *)calloc(1, sizeof(connection_t));
         if (!conn) {
-            close(client_fd);
+            http2_session_t *h2 = http2_session_get(client_fd);
+            if (h2) http2_session_destroy(h2);
+            cocoon_socket_close(client_fd);
             continue;
         }
         conn->fd = client_fd;
@@ -617,21 +936,33 @@ static void accept_loop(void *arg) {
         conn->timeout_ms = ctx->config.timeout_ms > 0 ? ctx->config.timeout_ms : CONN_TIMEOUT_MS;
         conn->gzip_enabled = ctx->config.gzip_enabled;
         conn->brotli_enabled = ctx->config.brotli_enabled;
+        memcpy(&conn->client_addr, &client_addr, sizeof(client_addr));
+        conn->addr_len = addr_len;
+        conn->response_status = 0;
 
         atomic_fetch_add(&g_active_connections, 1);
         log_debug("新连接 fd=%d，当前活跃连接: %d", client_fd,
                   atomic_load(&g_active_connections));
 
-        if (ctx->config.threaded && coco_sched_get_current()) {
-            /* 多线程协程模式：创建协程处理连接 */
-            coco_coro_t *coro = coco_create(coco_sched_get_current(),
-                                            client_handler, conn, 0);
+        if (ctx->config.threaded) {
+            /* 多线程模式：使用 coco_go_with_opts 创建工作协程，128KB 栈 */
+            coco_go_opts_t opts = {
+                .stack_size = 1024 * 1024,
+                .context = NULL,
+                .priority = -1,
+                .p_id = -1
+            };
+            coco_coro_t *coro = coco_go_with_opts(client_handler, conn, &opts);
             if (!coro) {
-                log_error("创建协程失败，关闭连接 fd=%d", client_fd);
-                atomic_fetch_sub(&g_active_connections, 1);
-                close_connection(conn);
+                log_error("coco_go_with_opts(client_handler) 返回 NULL，无法创建协程 fd=%d", client_fd);
+                http2_session_t *h2 = http2_session_get(client_fd);
+                if (h2) http2_session_destroy(h2);
+                cocoon_socket_close(client_fd);
                 free(conn);
+                atomic_fetch_sub(&g_active_connections, 1);
+                continue;
             }
+            log_debug("client_handler 协程已创建 coro=%p fd=%d", (void*)coro, client_fd);
         } else {
             /* 单线程模式：直接调用处理函数（阻塞） */
             client_handler(conn);
@@ -689,8 +1020,15 @@ server_context_t *server_create(const cocoon_config_t *config) {
         return NULL;
     }
 
-    /* 非阻塞模式 */
-    set_nonblocking(ctx->listen_fd);
+    /* 初始化 TLS 上下文（如果配置了证书） */
+    if (ctx->config.tls_cert && ctx->config.tls_key) {
+        if (tls_create_context(ctx->config.tls_cert, ctx->config.tls_key) != 0) {
+            log_error("TLS 上下文初始化失败");
+            close(ctx->listen_fd);
+            free(ctx);
+            return NULL;
+        }
+    }
 
     return ctx;
 }
@@ -721,14 +1059,17 @@ int server_start(server_context_t *ctx) {
             return COCOON_ERROR;
         }
 
-        /* 在调度器上运行 accept 循环 */
-        /* 注意：当前实现使用主线程直接 accept，多线程仅用于工作协程 */
+        /* 多线程模式下 listen_fd 需要非阻塞（用于 accept + poll 等待） */
+        set_nonblocking(ctx->listen_fd);
+
+        /* 在主线程中运行 accept_loop */
         accept_loop(ctx);
 
+        /* 等待所有协程完成 */
         coco_global_sched_wait();
         coco_global_sched_stop();
     } else {
-        /* 单线程模式 */
+        /* 单线程模式：listen_fd 保持阻塞 */
         accept_loop(ctx);
     }
 
@@ -745,6 +1086,10 @@ int server_start(server_context_t *ctx) {
 void server_stop(server_context_t *ctx) {
     if (ctx) {
         ctx->running = 0;
+        if (ctx->listen_fd >= 0) {
+            close(ctx->listen_fd);
+            ctx->listen_fd = -1;
+        }
     }
 }
 
@@ -757,6 +1102,8 @@ void server_stop(server_context_t *ctx) {
  */
 void server_destroy(server_context_t *ctx) {
     if (!ctx) return;
+
+    tls_destroy_context();
 
     if (ctx->listen_fd != COCOON_INVALID_SOCKET) {
         cocoon_socket_close(ctx->listen_fd);

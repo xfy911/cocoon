@@ -117,14 +117,39 @@ int ws_send_ping(int fd);
 int ws_send_pong(int fd, const uint8_t *payload, size_t len);
 
 /**
+ * @brief 向所有活跃 WebSocket 连接广播文本消息
+ *
+ * @param text 文本内容
+ * @return 成功发送的连接数
+ */
+int ws_broadcast(const char *text);
+
+/**
+ * @brief 向指定频道的所有连接发送文本消息
+ *
+ * @param path 频道路径
+ * @param text 文本内容
+ * @return 成功发送的连接数
+ */
+int ws_broadcast_to_path(const char *path, const char *text);
+
+/**
+ * @brief 获取当前 WebSocket 连接数
+ *
+ * @return 活跃连接数
+ */
+int ws_connection_count(void);
+
+/**
  * @brief 处理 WebSocket 连接（主循环）
  *
  * 进入 WebSocket 帧循环，处理文本/二进制/ping/pong/close。
- * 当前实现为简单 echo 服务器。
+ * 连接自动注册到全局广播表，退出时注销。
  *
  * @param fd 客户端 socket
  * @param timeout_ms 超时毫秒（0 表示默认）
+ * @param path WebSocket 握手路径（频道标识，可为 NULL）
  */
-void ws_handle_connection(int fd, uint32_t timeout_ms);
+void ws_handle_connection(int fd, uint32_t timeout_ms, const char *path);
 
 #endif /* WEBSOCKET_H */

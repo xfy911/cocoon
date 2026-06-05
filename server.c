@@ -795,7 +795,7 @@ static void client_handler(void *arg) {
                         memmove(conn->buf, conn->buf + parsed, conn->buf_len - (size_t)parsed);
                     }
                     conn->buf_len -= (size_t)parsed;
-                    ws_handle_connection(conn->fd, conn->timeout_ms);
+                    ws_handle_connection(conn->fd, conn->timeout_ms, req.path);
                     break;
                 }
             }

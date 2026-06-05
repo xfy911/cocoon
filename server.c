@@ -26,6 +26,7 @@
 #include "access_log.h"
 #include "websocket.h"
 #include "platform.h"
+#include "middleware.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,6 +64,7 @@ typedef struct {
 struct server_context {
     cocoon_socket_t     listen_fd;    /**< 监听 socket */
     cocoon_config_t     config;       /**< 配置副本 */
+    cocoon_middleware_config_t mw_config; /**< 中间件配置（持久化，避免栈变量悬空） */
     volatile int        running;      /**< 运行标志 */
     coco_sched_t       *sched;        /**< 协程调度器 */
 };
@@ -362,6 +364,15 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         memmove(conn->buf, conn->buf + parsed, conn->buf_len - (size_t)parsed);
     }
     conn->buf_len -= (size_t)parsed;
+
+    /* 执行中间件链 */
+    if (cocoon_middleware_run(&req, conn->fd) != 0) {
+        /* 某个中间件已短路请求，清理并返回 */
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, -1);
+        http_request_free(&req);
+        return req.keep_alive;
+    }
 
     /* 读取请求体（如果需要） */
     if (req.content_length > 0) {
@@ -1030,6 +1041,13 @@ server_context_t *server_create(const cocoon_config_t *config) {
         }
     }
 
+    /* 初始化内置中间件（使用 ctx->mw_config 避免栈变量悬空） */
+    ctx->mw_config.cors_enabled = ctx->config.cors_enabled;
+    ctx->mw_config.auth_user    = ctx->config.auth_user;
+    ctx->mw_config.auth_pass    = ctx->config.auth_pass;
+    ctx->mw_config.rate_limit   = ctx->config.rate_limit;
+    cocoon_middleware_init_builtin(&ctx->mw_config);
+
     return ctx;
 }
 
@@ -1102,6 +1120,8 @@ void server_stop(server_context_t *ctx) {
  */
 void server_destroy(server_context_t *ctx) {
     if (!ctx) return;
+
+    cocoon_middleware_cleanup();
 
     tls_destroy_context();
 

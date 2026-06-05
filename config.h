@@ -45,6 +45,8 @@ void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
                   bool has_max_conn, bool has_timeout, bool has_log_level,
                   bool has_gzip_enabled, bool has_brotli_enabled,
                   bool has_tls_cert, bool has_tls_key, bool has_tls_enabled,
-                  bool has_access_log);
+                  bool has_access_log,
+                  bool has_cors_enabled, bool has_auth_user, bool has_auth_pass,
+                  bool has_rate_limit);
 
 #endif /* COCOON_CONFIG_H */

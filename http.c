@@ -289,6 +289,14 @@ int http_format_response_header(char *buf, size_t buf_size, const http_response_
         }
     }
 
+    if (resp->cors_origin && resp->cors_origin[0]) {
+        if ((size_t)n < buf_size) {
+            n += snprintf(buf + n, buf_size - (size_t)n, "Access-Control-Allow-Origin: %s\r\n", resp->cors_origin);
+        } else {
+            n += (int)strlen(resp->cors_origin) + 28;
+        }
+    }
+
     /* 连接头 + 空行 */
     if ((size_t)n < buf_size) {
         n += snprintf(buf + n, buf_size - (size_t)n,

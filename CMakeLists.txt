@@ -28,6 +28,11 @@ set(COCOON_SOURCES
     config.c
     multipart.c
     platform.c
+    tls.c
+    http2.c
+    access_log.c
+    websocket.c
+    middleware.c
 )
 
 # 头文件路径

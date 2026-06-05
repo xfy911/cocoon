@@ -57,6 +57,10 @@ static void print_usage(const char *prog) {
     printf("  --tls          显式启用 TLS（需同时指定 --cert 和 --key）\n");
     printf("  --no-gzip   禁用 gzip 压缩\n");
     printf("  --access-log <path> 访问日志文件路径（- 表示 stdout）\n");
+    printf("  --cors       启用 CORS 支持\n");
+    printf("  --auth-user <user>  Basic Auth 用户名\n");
+    printf("  --auth-pass <pass>  Basic Auth 密码\n");
+    printf("  --rate-limit <n>    每秒最大请求数（限流）\n");
     printf("  -h          显示此帮助\n");
     printf("\nExample:\n");
     printf("  %s -c cocoon.json\n", prog);
@@ -89,6 +93,12 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
     config->tls_cert = NULL;
     config->tls_key = NULL;
     config->tls_enabled = false;
+    config->access_log_path = NULL;
+
+    config->cors_enabled = false;
+    config->auth_user = NULL;
+    config->auth_pass = NULL;
+    config->rate_limit = 0;
 
     bool has_root_dir = false;
     bool has_port = false;
@@ -102,6 +112,10 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
     bool has_tls_key = false;
     bool has_tls_enabled = false;
     bool has_access_log = false;
+    bool has_cors_enabled = false;
+    bool has_auth_user = false;
+    bool has_auth_pass = false;
+    bool has_rate_limit = false;
     const char *config_file = NULL;
 
     for (int i = 1; i < argc; i++) {
@@ -166,6 +180,21 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
             if (++i >= argc) return false;
             config->access_log_path = strdup(argv[i]);
             has_access_log = true;
+        } else if (strcmp(argv[i], "--cors") == 0) {
+            config->cors_enabled = true;
+            has_cors_enabled = true;
+        } else if (strcmp(argv[i], "--auth-user") == 0) {
+            if (++i >= argc) return false;
+            config->auth_user = strdup(argv[i]);
+            has_auth_user = true;
+        } else if (strcmp(argv[i], "--auth-pass") == 0) {
+            if (++i >= argc) return false;
+            config->auth_pass = strdup(argv[i]);
+            has_auth_pass = true;
+        } else if (strcmp(argv[i], "--rate-limit") == 0) {
+            if (++i >= argc) return false;
+            config->rate_limit = (uint32_t)atoi(argv[i]);
+            has_rate_limit = true;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             exit(0);
@@ -186,7 +215,9 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
                      has_max_conn, has_timeout, has_log_level,
                      has_gzip_enabled, has_brotli_enabled,
                      has_tls_cert, has_tls_key, has_tls_enabled,
-                     has_access_log);
+                     has_access_log,
+                     has_cors_enabled, has_auth_user, has_auth_pass,
+                     has_rate_limit);
     }
 
     if (!config->root_dir) {
@@ -207,7 +238,7 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
  * @return 0 成功，1 失败
  */
 int main(int argc, char *argv[]) {
-    cocoon_config_t config;
+    cocoon_config_t config = {0};
 
     if (!parse_args(argc, argv, &config)) {
         print_usage(argv[0]);
@@ -256,6 +287,8 @@ int main(int argc, char *argv[]) {
     if (config.tls_cert) free((void *)config.tls_cert);
     if (config.tls_key) free((void *)config.tls_key);
     if (config.access_log_path) free((void *)config.access_log_path);
+    if (config.auth_user) free((void *)config.auth_user);
+    if (config.auth_pass) free((void *)config.auth_pass);
 
     return ret == COCOON_OK ? 0 : 1;
 }

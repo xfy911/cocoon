@@ -295,6 +295,24 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
                 free((void *)config->access_log_path);
                 config->access_log_path = v;
             }
+        } else if (strcmp(key_str, "cors_enabled") == 0) {
+            if (val.type == TOKEN_TRUE) config->cors_enabled = true;
+            else if (val.type == TOKEN_FALSE) config->cors_enabled = false;
+        } else if (strcmp(key_str, "auth_user") == 0 && val.type == TOKEN_STRING) {
+            char *v = token_str_dup(&val);
+            if (v) {
+                free((void *)config->auth_user);
+                config->auth_user = v;
+            }
+        } else if (strcmp(key_str, "auth_pass") == 0 && val.type == TOKEN_STRING) {
+            char *v = token_str_dup(&val);
+            if (v) {
+                free((void *)config->auth_pass);
+                config->auth_pass = v;
+            }
+        } else if (strcmp(key_str, "rate_limit") == 0 && val.type == TOKEN_NUMBER) {
+            long v = token_to_long(&val);
+            if (v >= 0 && v < 1000000) config->rate_limit = (uint32_t)v;
         }
         /* 其他字段：忽略（未来扩展预留） */
 
@@ -319,7 +337,9 @@ void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
                   bool has_max_conn, bool has_timeout, bool has_log_level,
                   bool has_gzip_enabled, bool has_brotli_enabled,
                   bool has_tls_cert, bool has_tls_key, bool has_tls_enabled,
-                  bool has_access_log) {
+                  bool has_access_log,
+                  bool has_cors_enabled, bool has_auth_user, bool has_auth_pass,
+                  bool has_rate_limit) {
     if (!base || !cmdline) return;
 
     /* 命令行显式指定的值覆盖配置文件 */
@@ -347,6 +367,16 @@ void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
         free((void *)base->access_log_path);
         base->access_log_path = strdup(cmdline->access_log_path);
     }
+    if (has_cors_enabled) base->cors_enabled = cmdline->cors_enabled;
+    if (has_auth_user && cmdline->auth_user) {
+        free((void *)base->auth_user);
+        base->auth_user = strdup(cmdline->auth_user);
+    }
+    if (has_auth_pass && cmdline->auth_pass) {
+        free((void *)base->auth_pass);
+        base->auth_pass = strdup(cmdline->auth_pass);
+    }
+    if (has_rate_limit) base->rate_limit = cmdline->rate_limit;
     /* threaded 是 flag 参数，命令行指定了就用命令行的 */
     if (cmdline->threaded) base->threaded = true;
 }

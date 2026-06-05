@@ -42,6 +42,11 @@ typedef struct cocoon_config {
     const char *tls_cert;        /**< TLS 证书路径 */
     const char *tls_key;         /**< TLS 私钥路径 */
     const char *access_log_path; /**< 访问日志文件路径（NULL 或 "-" 表示 stdout） */
+    /* 中间件配置 */
+    bool        cors_enabled;      /**< 是否启用 CORS 支持 */
+    const char *auth_user;         /**< Basic Auth 用户名 */
+    const char *auth_pass;         /**< Basic Auth 密码 */
+    uint32_t    rate_limit;        /**< 每秒最大请求数（0 表示禁用） */
 } cocoon_config_t;
 
 /* === 服务器生命周期 API === */

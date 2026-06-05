@@ -18,9 +18,23 @@ TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"; kill_server' EXIT
 
 kill_server() {
-    pkill -f "cocoon.*-p 9999" 2>/dev/null || true
-    pkill -f "cocoon.*--cert" 2>/dev/null || true
+    local pids
+    pids=$(pgrep -f "cocoon.*-p 9999" 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+        echo "$pids" | xargs kill -9 2>/dev/null || true
+    fi
+    pids=$(pgrep -f "cocoon.*--cert" 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+        echo "$pids" | xargs kill -9 2>/dev/null || true
+    fi
     sleep 0.5
+    # 确保端口已释放
+    for i in {1..20}; do
+        if ! ss -tlnp 2>/dev/null | grep -q ':9999'; then
+            break
+        fi
+        sleep 0.1
+    done
 }
 
 # 启动服务器
@@ -29,7 +43,7 @@ start_server() {
     $SERVER -r "$ROOT" -p 9999 -l debug > "$TMPDIR/server.log" 2>&1 &
     local pid=$!
     for i in {1..30}; do
-        if curl -s -o /dev/null "$BASE/" 2>/dev/null; then
+        if nc -z localhost 9999 2>/dev/null; then
             echo "[test] 服务器就绪 (PID $pid)"
             return 0
         fi
@@ -721,6 +735,88 @@ else
 fi
 
 # WebSocket 测试
+# 停止 HTTP 服务器，恢复默认服务器
+kill_server
+sleep 1
+start_server
+
+# 中间件测试
+echo ""
+echo "=== 中间件测试 ==="
+
+# CORS 测试
+kill_server
+sleep 1
+$SERVER -r "$ROOT" -p 9999 --cors > "$TMPDIR/server_cors.log" 2>&1 &
+for i in {1..30}; do
+    if nc -z localhost 9999 2>/dev/null; then break; fi
+    sleep 0.1
+done
+cors_status=$(curl -s -o /dev/null -w "%{http_code}" -X OPTIONS "$BASE/" -H "Origin: http://example.com" -H "Access-Control-Request-Method: POST")
+if [[ "$cors_status" == "204" ]]; then
+    echo "  ✓ CORS OPTIONS 预检 — HTTP 204"
+    pass
+else
+    echo "  ✗ CORS OPTIONS 预检 — 期望 204, 实际 $cors_status"
+    fail
+fi
+
+# Basic Auth 测试
+kill_server
+sleep 1
+$SERVER -r "$ROOT" -p 9999 --auth-user "admin" --auth-pass "secret" > "$TMPDIR/server_auth.log" 2>&1 &
+for i in {1..30}; do
+    if nc -z localhost 9999 2>/dev/null; then break; fi
+    sleep 0.1
+done
+auth_no_cred=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/")
+if [[ "$auth_no_cred" == "401" ]]; then
+    echo "  ✓ Basic Auth 无认证 — HTTP 401"
+    pass
+else
+    echo "  ✗ Basic Auth 无认证 — 期望 401, 实际 $auth_no_cred"
+    fail
+fi
+auth_with_cred=$(curl -s -o /dev/null -w "%{http_code}" -u "admin:secret" "$BASE/")
+if [[ "$auth_with_cred" == "200" ]]; then
+    echo "  ✓ Basic Auth 正确认证 — HTTP 200"
+    pass
+else
+    echo "  ✗ Basic Auth 正确认证 — 期望 200, 实际 $auth_with_cred"
+    fail
+fi
+auth_wrong_pass=$(curl -s -o /dev/null -w "%{http_code}" -u "admin:wrong" "$BASE/")
+if [[ "$auth_wrong_pass" == "401" ]]; then
+    echo "  ✓ Basic Auth 错误密码 — HTTP 401"
+    pass
+else
+    echo "  ✗ Basic Auth 错误密码 — 期望 401, 实际 $auth_wrong_pass"
+    fail
+fi
+
+# Rate Limit 测试
+kill_server
+sleep 1
+$SERVER -r "$ROOT" -p 9999 --rate-limit 1 > "$TMPDIR/server_ratelimit.log" 2>&1 &
+for i in {1..30}; do
+    if nc -z localhost 9999 2>/dev/null; then break; fi
+    sleep 0.1
+done
+rl_first=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/")
+rl_second=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/")
+if [[ "$rl_first" == "200" && "$rl_second" == "429" ]]; then
+    echo "  ✓ Rate Limit 限流 — 第1次 200, 第2次 429"
+    pass
+else
+    echo "  ✗ Rate Limit 限流 — 期望 200+429, 实际 $rl_first+$rl_second"
+    fail
+fi
+
+# 恢复默认服务器
+kill_server
+sleep 1
+start_server
+
 echo ""
 echo "=== WebSocket 测试 ==="
 

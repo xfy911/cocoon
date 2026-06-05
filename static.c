@@ -21,6 +21,13 @@
 #include <zlib.h>
 #include <brotli/encode.h>
 
+
+static bool g_cors_enabled = false;
+
+void static_set_cors(bool enabled) {
+    g_cors_enabled = enabled;
+    log_info("CORS 支持已 %s", enabled ? "启用" : "禁用");
+}
 /**
  * is_compressible_mime - 鍒ゆ柇 MIME 绫诲瀷鏄惁閫傚悎鍘嬬缉
  *

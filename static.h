@@ -62,4 +62,13 @@ int static_serve_directory(int fd, const http_request_t *req,
  */
 int static_send_error(int fd, int status_code, bool keep_alive);
 
+/**
+ * static_set_cors - 设置是否启用 CORS 响应头
+ *
+ * 全局开关，启用后所有 HTTP 响应自动添加 Access-Control-Allow-Origin: *。
+ *
+ * @param enabled true 启用，false 禁用
+ */
+void static_set_cors(bool enabled);
+
 #endif /* COCOON_STATIC_H */

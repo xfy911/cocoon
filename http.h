@@ -86,6 +86,9 @@ typedef struct {
     
     /* 压缩 */
     const char *content_encoding;
+
+    /* CORS */
+    const char *cors_origin;
 } http_response_t;
 
 /* === API === */

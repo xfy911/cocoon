@@ -409,7 +409,48 @@ assert_access_log() {
 start_server
 
 echo ""
-echo "=== 基础功能测试 ==="
+echo "=== 健康检查端点测试 ==="
+health_body=$(curl -s "$BASE/_health")
+health_status=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/_health")
+if [[ "$health_status" == "200" ]]; then
+    echo "  ✓ /_health 状态码 — HTTP 200"
+    pass
+else
+    echo "  ✗ /_health 状态码 — 期望 200, 实际 $health_status"
+    fail
+fi
+if echo "$health_body" | grep -q '"status": "ok"'; then
+    echo "  ✓ /_health 响应体 — 包含 status: ok"
+    pass
+else
+    echo "  ✗ /_health 响应体 — 缺少 status: ok"
+    fail
+fi
+if echo "$health_body" | grep -q '"version": "Cocoon/1.0"'; then
+    echo "  ✓ /_health 响应体 — 包含版本信息"
+    pass
+else
+    echo "  ✗ /_health 响应体 — 缺少版本信息"
+    fail
+fi
+if echo "$health_body" | grep -q '"connections"'; then
+    echo "  ✓ /_health 响应体 — 包含连接数信息"
+    pass
+else
+    echo "  ✗ /_health 响应体 — 缺少连接数信息"
+    fail
+fi
+if echo "$health_body" | grep -q '"middleware"'; then
+    echo "  ✓ /_health 响应体 — 包含中间件信息"
+    pass
+else
+    echo "  ✗ /_health 响应体 — 缺少中间件信息"
+    fail
+fi
+
+assert_head_status "$BASE/_health" "200" "健康检查 HEAD"
+
+assert_status "$BASE/_health/nonexistent" "404" "健康检查路径遍历"
 assert_status "$BASE/" "200" "首页 GET"
 assert_status "$BASE/index.html" "200" "index.html GET"
 assert_status "$BASE/nonexist.html" "404" "404 页面"

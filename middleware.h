@@ -131,6 +131,17 @@ int cocoon_middleware_basic_auth(http_request_t *req, cocoon_socket_t fd, void *
 int cocoon_middleware_rate_limit(http_request_t *req, cocoon_socket_t fd, void *user_data);
 
 /**
+ * cocoon_middleware_list - 获取已注册中间件名称列表
+ *
+ * 将名称写入提供的缓冲区数组，每个名称最多 32 字节。
+ *
+ * @param names  名称缓冲区数组（二维字符数组）
+ * @param count  数组容量（最大能存放多少个名称）
+ * @return 实际写入的中间件数量
+ */
+int cocoon_middleware_list(char names[][32], int count);
+
+/**
  * cocoon_middleware_init_builtin - 根据配置初始化内置中间件
  *
  * 一键注册所有启用配置的内置中间件。

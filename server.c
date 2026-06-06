@@ -28,6 +28,7 @@
 #include "websocket.h"
 #include "platform.h"
 #include "middleware.h"
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,6 +73,10 @@ struct server_context {
 
 /* 全局活跃连接计数器（线程安全） */
 static atomic_int g_active_connections = 0;
+/* 服务器启动时间 */
+static time_t g_server_start_time = 0;
+/* 最大连接数（供健康检查端点使用） */
+static uint32_t g_max_connections = 0;
 
 /**
  * set_nonblocking - 设置 socket 为非阻塞模式
@@ -404,6 +409,83 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         static_send_error(conn->fd, 405, req.keep_alive);
         access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
                          &req, conn->response_status, -1);
+        http_request_free(&req);
+        return req.keep_alive;
+    }
+
+    /* 健康检查端点 */
+    if (strcmp(req.path, "/_health") == 0) {
+        time_t now = time(NULL);
+        time_t uptime = now - g_server_start_time;
+        int active = atomic_load(&g_active_connections);
+
+        char mw_names[16][32];
+        int mw_count = cocoon_middleware_list(mw_names, 16);
+
+        /* 构建 JSON */
+        char body[2048];
+        int n = snprintf(body, sizeof(body),
+            "{\n"
+            "  \"status\": \"ok\",\n"
+            "  \"version\": \"Cocoon/1.0\",\n"
+            "  \"uptime_seconds\": %ld,\n"
+            "  \"connections\": {\n"
+            "    \"active\": %d,\n"
+            "    \"max\": %u\n"
+            "  },\n"
+            "  \"plugins\": {\n"
+            "    \"count\": %zu,\n"
+            "    \"list\": [\n",
+            uptime, active,
+            g_max_connections,
+            cocoon_plugin_count());
+
+        for (size_t i = 0; i < cocoon_plugin_count(); i++) {
+            const char *path = cocoon_plugin_get_path(i);
+            const char *ver = cocoon_plugin_get_version(i);
+            n += snprintf(body + n, sizeof(body) - n,
+                "      {\"path\":\"%s\",\"version\":\"%s\"}%s\n",
+                path ? path : "",
+                ver ? ver : "unknown",
+                (i + 1 < cocoon_plugin_count()) ? "," : "");
+        }
+
+        n += snprintf(body + n, sizeof(body) - n,
+            "    ]\n"
+            "  },\n"
+            "  \"middleware\": {\n"
+            "    \"count\": %d,\n"
+            "    \"names\": [\n",
+            mw_count);
+
+        for (int i = 0; i < mw_count; i++) {
+            n += snprintf(body + n, sizeof(body) - n,
+                "      \"%s\"%s\n",
+                mw_names[i],
+                (i + 1 < mw_count) ? "," : "");
+        }
+
+        n += snprintf(body + n, sizeof(body) - n,
+            "    ]\n"
+            "  }\n"
+            "}");
+
+        char header[512];
+        int header_len = snprintf(header, sizeof(header),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: %d\r\n"
+            "Connection: %s\r\n"
+            "Server: Cocoon/1.0\r\n"
+            "\r\n",
+            n, req.keep_alive ? "keep-alive" : "close");
+
+        send_all(conn->fd, header, (size_t)header_len);
+        send_all(conn->fd, body, (size_t)n);
+
+        conn->response_status = 200;
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, n);
         http_request_free(&req);
         return req.keep_alive;
     }
@@ -1001,6 +1083,8 @@ server_context_t *server_create(const cocoon_config_t *config) {
     ctx->config.root_dir = strdup(config->root_dir);
     ctx->running = 1;
 
+    g_max_connections = config->max_connections;
+
     /* 创建监听 socket */
     ctx->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (ctx->listen_fd == COCOON_INVALID_SOCKET) {
@@ -1069,6 +1153,8 @@ server_context_t *server_create(const cocoon_config_t *config) {
  */
 int server_start(server_context_t *ctx) {
     if (!ctx) return COCOON_ERROR;
+
+    g_server_start_time = time(NULL);
 
     if (ctx->config.threaded) {
         /* 多线程协程模式 */

@@ -242,6 +242,21 @@ void cocoon_middleware_cleanup(void) {
     pthread_mutex_unlock(&g_rate_limit_mutex);
 }
 
+int cocoon_middleware_list(char names[][32], int count) {
+    if (!names || count <= 0) return 0;
+    int n = 0;
+    for (int i = 0; i < g_count && n < count; i++) {
+        if (g_registry[i].active) {
+            size_t len = strlen(g_registry[i].name);
+            if (len > 31) len = 31;
+            memcpy(names[n], g_registry[i].name, len);
+            names[n][len] = '\0';
+            n++;
+        }
+    }
+    return n;
+}
+
 /* === 内置中间件 === */
 
 int cocoon_middleware_cors(http_request_t *req, cocoon_socket_t fd, void *user_data) {

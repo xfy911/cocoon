@@ -9,6 +9,7 @@ tests/unit/test_log
 tests/unit/test_multipart
 tests/unit/test_static
 tests/unit/test_server
+tests/unit/test_websocket
 tests/fixtures/uploads/
 plugins/*.so
 www/uploads/

@@ -28,6 +28,8 @@ typedef enum {
     TOKEN_NUMBER,      /* 123 */
     TOKEN_TRUE,        /* true */
     TOKEN_FALSE,       /* false */
+    TOKEN_LBRACKET,  /* [ */
+    TOKEN_RBRACKET,    /* ] */
     TOKEN_COMMA,       /* , */
     TOKEN_COLON,       /* : */
     TOKEN_INVALID      /* 错误 */
@@ -89,6 +91,8 @@ static token_t parser_next_token(parser_t *p) {
     switch (c) {
         case '{': p->pos++; t.type = TOKEN_LBRACE; return t;
         case '}': p->pos++; t.type = TOKEN_RBRACE; return t;
+        case '[': p->pos++; t.type = TOKEN_LBRACKET; return t;
+        case ']': p->pos++; t.type = TOKEN_RBRACKET; return t;
         case ',': p->pos++; t.type = TOKEN_COMMA; return t;
         case ':': p->pos++; t.type = TOKEN_COLON; return t;
         case '"': {
@@ -313,13 +317,36 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
         } else if (strcmp(key_str, "rate_limit") == 0 && val.type == TOKEN_NUMBER) {
             long v = token_to_long(&val);
             if (v >= 0 && v < 1000000) config->rate_limit = (uint32_t)v;
-        } else if (strcmp(key_str, "plugins") == 0 && val.type == TOKEN_STRING) {
-            char *v = token_str_dup(&val);
-            if (v && config->num_plugins < COCOON_MAX_PLUGINS) {
-                config->plugins[config->num_plugins++] = v;
+        } else if (strcmp(key_str, "plugins") == 0) {
+            if (val.type == TOKEN_STRING) {
+                char *v = token_str_dup(&val);
+                if (v && config->num_plugins < COCOON_MAX_PLUGINS) {
+                    config->plugins[config->num_plugins++] = v;
+                }
+            } else if (val.type == TOKEN_LBRACKET) {
+                /* 解析字符串数组 */
+                while (1) {
+                    token_t item = parser_next_token(&p);
+                    if (item.type == TOKEN_RBRACKET) break;
+                    if (item.type == TOKEN_STRING) {
+                        char *v = token_str_dup(&item);
+                        if (v && config->num_plugins < COCOON_MAX_PLUGINS) {
+                            config->plugins[config->num_plugins++] = v;
+                        }
+                    } else {
+                        fprintf(stderr, "[Config] 第 %d 行: plugins 数组期望字符串项\n", item.line);
+                    }
+                    token_t sep = parser_next_token(&p);
+                    if (sep.type == TOKEN_RBRACKET) break;
+                    if (sep.type != TOKEN_COMMA) {
+                        fprintf(stderr, "[Config] 第 %d 行: plugins 数组期望 ',' 或 ']'\n", sep.line);
+                        break;
+                    }
+                }
+            } else {
+                fprintf(stderr, "[Config] 第 %d 行: plugins 期望字符串或数组\n", val.line);
             }
-        }
-        /* 其他字段：忽略（未来扩展预留） */
+        } /* 其他字段：忽略（未来扩展预留） */
 
         free(key_str);
 

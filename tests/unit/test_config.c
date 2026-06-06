@@ -312,6 +312,55 @@ void test_load_brotli_enabled(void) {
     cleanup(p3);
 }
 
+void test_load_plugins_string(void) {
+    const char *p = write_temp_config(
+        "{\n"
+        "  \"port\": 3000,\n"
+        "  \"plugins\": \"plugins/hello.so\"\n"
+        "}\n"
+    );
+    cocoon_config_t cfg = {0};
+    TEST_ASSERT_TRUE(config_load_from_file(p, &cfg));
+    TEST_ASSERT_EQUAL(1, cfg.num_plugins);
+    TEST_ASSERT_EQUAL_STRING("plugins/hello.so", cfg.plugins[0]);
+    free((void *)cfg.root_dir);
+    for (size_t i = 0; i < cfg.num_plugins; i++) free((void *)cfg.plugins[i]);
+    cleanup(p);
+}
+
+void test_load_plugins_array(void) {
+    const char *p = write_temp_config(
+        "{\n"
+        "  \"port\": 3000,\n"
+        "  \"plugins\": [\"plugins/a.so\"]\n"
+        "}\n"
+    );
+    cocoon_config_t cfg = {0};
+    TEST_ASSERT_TRUE(config_load_from_file(p, &cfg));
+    TEST_ASSERT_EQUAL(1, cfg.num_plugins);
+    TEST_ASSERT_EQUAL_STRING("plugins/a.so", cfg.plugins[0]);
+    free((void *)cfg.root_dir);
+    for (size_t i = 0; i < cfg.num_plugins; i++) free((void *)cfg.plugins[i]);
+    cleanup(p);
+}
+
+void test_load_plugins_array_multiple(void) {
+    const char *p = write_temp_config(
+        "{\n"
+        "  \"port\": 3000,\n"
+        "  \"plugins\": [\"plugins/a.so\", \"plugins/b.so\"]\n"
+        "}\n"
+    );
+    cocoon_config_t cfg = {0};
+    TEST_ASSERT_TRUE(config_load_from_file(p, &cfg));
+    TEST_ASSERT_EQUAL(2, cfg.num_plugins);
+    TEST_ASSERT_EQUAL_STRING("plugins/a.so", cfg.plugins[0]);
+    TEST_ASSERT_EQUAL_STRING("plugins/b.so", cfg.plugins[1]);
+    free((void *)cfg.root_dir);
+    for (size_t i = 0; i < cfg.num_plugins; i++) free((void *)cfg.plugins[i]);
+    cleanup(p);
+}
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -338,5 +387,8 @@ int main(void) {
 
     RUN_TEST(test_load_gzip_enabled);
     RUN_TEST(test_load_brotli_enabled);
+    RUN_TEST(test_load_plugins_string);
+    RUN_TEST(test_load_plugins_array);
+    RUN_TEST(test_load_plugins_array_multiple);
     return UNITY_END();
 }

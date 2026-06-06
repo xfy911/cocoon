@@ -55,10 +55,17 @@ deps:
 # 完整构建（先构建依赖，再构建项目）
 build-all: deps $(TARGET)
 
-# 集成测试
+# 集成测试（curl + bash）
 test: $(TARGET)
 	@echo "[Cocoon] 运行集成测试..."
 	@./tests/integration_test.sh
+
+# 集成测试别名（更直观）
+integration-test: test
+
+# 一键运行所有测试（单元 + 集成）
+test-all: unit-test test
+	@echo "[Cocoon] 全部测试完成 ✓"
 
 # 性能基准
 bench: $(TARGET)
@@ -125,4 +132,4 @@ clean:
 # 重新构建
 rebuild: clean all
 
-.PHONY: all clean install uninstall rebuild deps build-all test bench unit-test test-all
+.PHONY: all clean install uninstall rebuild deps build-all test integration-test test-all bench unit-test

@@ -1,4 +1,4 @@
-# Cocoon
+# Cocoon [![CI](https://github.com/xfy911/cocoon/actions/workflows/ci.yml/badge.svg)](https://github.com/xfy911/cocoon/actions/workflows/ci.yml)
 
 > 一只从 **coco** 协程库中孵化出的轻量 Web 服务器。
 
@@ -21,8 +21,16 @@
 | 🔐 路径安全 | 自动防护路径遍历攻击 (`../`) |
 | 🛡️ 资源限制 | 空闲连接超时（默认 30s）+ 最大并发连接数限制 |
 | 📝 分级日志 | error / warn / info / debug 四级输出，命令行可调 |
-| 🌐 POST 回显 | 支持 JSON / form-urlencoded 请求体回显（API 测试） |
+| 📊 访问日志 | Nginx combined 格式，记录 User-Agent / Referer / 状态码 |
+| 🌐 POST 回显 | 支持 JSON / form-urlencoded / multipart 文件上传 |
 | 🔧 配置文件 | JSON 配置文件 + 命令行参数覆盖，生产部署友好 |
+| 🔒 HTTPS | TLS 1.2/1.3，OpenSSL Memory BIO 集成，ALPN 协商 HTTP/2 |
+| 🚀 HTTP/2 | 完整 HTTP/2 支持（TLS + h2c 明文升级），多路复用 |
+| 🔌 WebSocket | RFC 6455，支持广播 / 频道路由 / 定向发送 |
+| 🧩 中间件 | 内置 CORS / Basic Auth / Rate Limit，可自定义注册 |
+| 🔌 插件系统 | 动态加载 .so 插件，SIGUSR1 热重载 |
+| 🏥 健康检查 | `/_health` 端点返回 JSON 服务器状态 |
+| 🪟 跨平台 | Linux / macOS / Windows（MinGW/MSVC）|
 
 ## Quick Start
 
@@ -103,6 +111,12 @@ curl -X POST -H "Content-Type: application/x-www-form-urlencoded" -d 'name=cocoo
 # 集成测试（curl + bash）
 make test
 
+# 单元测试（Unity 框架）
+make unit-test
+
+# 一键运行所有测试
+make test-all
+
 # 性能基准（wrk）
 make bench
 ```
@@ -123,6 +137,12 @@ Options:
   -v          详细日志输出（等同于 -l debug）
   --no-gzip   禁用 gzip 压缩
   --no-brotli 禁用 brotli 压缩
+  --cors      启用 CORS 中间件
+  --auth-user <user>  HTTP 基础认证用户名
+  --auth-pass <pass>  HTTP 基础认证密码
+  --rate-limit <rps>  每秒请求数限制（按 IP）
+  --access-log <path> 访问日志路径（- 表示 stdout）
+  --plugin <path>     加载插件（可多次指定）
   -h          显示帮助
 ```
 
@@ -154,8 +174,17 @@ Options:
 | `main.c` | 程序入口、信号处理、命令行参数解析 |
 | `server.c` | TCP 服务器生命周期 + 连接超时管理 + 并发限制 |
 | `http.c` | HTTP/1.1 请求解析、响应头格式化、MIME 类型推断 |
-| `static.c` | 静态文件服务（sendfile/gzip）、目录浏览 HTML、错误响应 |
+| `static.c` | 静态文件服务（sendfile/gzip/brotli）、目录浏览 HTML、错误响应 |
 | `log.c` | 分级日志输出（error/warn/info/debug） |
+| `access_log.c` | 访问日志（Nginx combined 格式） |
+| `config.c` | JSON 配置文件解析 |
+| `multipart.c` | multipart/form-data 文件上传解析 |
+| `tls.c` | TLS/SSL 层（OpenSSL Memory BIO） |
+| `http2.c` | HTTP/2 协议实现（nghttp2） |
+| `websocket.c` | WebSocket 协议（RFC 6455）+ 广播/频道路由 |
+| `middleware.c` | 中间件注册表 + 内置 CORS / Basic Auth / Rate Limit |
+| `plugin.c` | 动态插件加载 + 热重载 |
+| `platform.c` | 跨平台抽象（Linux/macOS/Windows） |
 | `cocoon.h` | 公共配置结构体与错误码定义 |
 
 ## 核心 API 速览
@@ -225,17 +254,26 @@ make bench
 - [x] ETag / Last-Modified 缓存协商 + 304 Not Modified
 - [x] Brotli / Gzip 动态压缩（Brotli 优先）
 - [x] 连接空闲超时 + 最大并发限制
-- [x] 分级日志系统
-- [x] POST 请求体解析（JSON / form-urlencoded 回显）
+- [x] 分级日志系统 + 访问日志
+- [x] POST 请求体解析（JSON / form-urlencoded / multipart 文件上传）
 - [x] 配置文件支持（JSON）
-- [ ] HTTPS / TLS 支持
-- [ ] HTTP/2 多路复用
+- [x] HTTPS / TLS 支持
+- [x] HTTP/2 多路复用（TLS + h2c）
+- [x] WebSocket 支持（广播 + 频道）
+- [x] 中间件机制（CORS / Basic Auth / Rate Limit）
+- [x] 插件系统（动态加载 + 热重载）
+- [x] 健康检查端点
+- [x] 跨平台支持（Windows）
+- [ ] 反向代理支持
+- [ ] 虚拟主机 / 多站点
 
 ## 构建与安装
 
 ```bash
 make build-all    # 完整构建（含 coco 依赖）
 make test         # 运行集成测试
+make unit-test    # 运行单元测试
+make test-all     # 一键运行所有测试
 make bench        # 运行性能基准
 make install      # 安装到 /usr/local/bin
 make clean        # 清理构建产物

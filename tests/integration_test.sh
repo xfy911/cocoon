@@ -27,6 +27,10 @@ kill_server() {
     if [[ -n "$pids" ]]; then
         echo "$pids" | xargs kill -9 2>/dev/null || true
     fi
+    pids=$(pgrep -f "cocoon.*-c " 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+        echo "$pids" | xargs kill -9 2>/dev/null || true
+    fi
     sleep 0.5
     # 确保端口已释放
     for i in {1..20}; do

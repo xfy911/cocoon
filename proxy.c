@@ -78,8 +78,10 @@ bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *
         rule->target_host[host_len] = '\0';
         rule->target_port = (uint16_t)atoi(colon + 1);
     } else {
-        strncpy(rule->target_host, host_port, sizeof(rule->target_host) - 1);
-        rule->target_host[sizeof(rule->target_host) - 1] = '\0';
+        size_t host_len = strlen(host_port);
+        if (host_len >= sizeof(rule->target_host)) host_len = sizeof(rule->target_host) - 1;
+        memcpy(rule->target_host, host_port, host_len);
+        rule->target_host[host_len] = '\0';
         rule->target_port = https ? 443 : 80;
     }
 

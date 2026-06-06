@@ -382,8 +382,14 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
                             }
                         }
                         if (prefix[0] && target[0] && config->num_proxies < COCOON_MAX_PROXY_RULES) {
-                            strncpy(config->proxies[config->num_proxies].prefix, prefix, sizeof(config->proxies[0].prefix)-1);
-                            strncpy(config->proxies[config->num_proxies].target, target, sizeof(config->proxies[0].target)-1);
+                            size_t prefix_len = strlen(prefix);
+                            if (prefix_len >= sizeof(config->proxies[0].prefix)) prefix_len = sizeof(config->proxies[0].prefix) - 1;
+                            memcpy(config->proxies[config->num_proxies].prefix, prefix, prefix_len);
+                            config->proxies[config->num_proxies].prefix[prefix_len] = '\0';
+                            size_t target_len = strlen(target);
+                            if (target_len >= sizeof(config->proxies[0].target)) target_len = sizeof(config->proxies[0].target) - 1;
+                            memcpy(config->proxies[config->num_proxies].target, target, target_len);
+                            config->proxies[config->num_proxies].target[target_len] = '\0';
                             config->num_proxies++;
                         }
                     } else {

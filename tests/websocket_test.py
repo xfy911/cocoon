@@ -227,19 +227,69 @@ def test_echo():
     return True
 
 
+def test_timeout(port=PORT, timeout=2):
+    """测试 WebSocket 空闲超时 — 连接后不发帧，等待服务端关闭"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout + 3)
+    sock.connect((HOST, port))
+
+    req, key = build_handshake()
+    sock.send(req.encode())
+
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = sock.recv(1024)
+        if not chunk:
+            break
+        data += chunk
+
+    status, headers = parse_response(data)
+    if "101" not in status:
+        print(f"FAIL: 握手失败: {status}")
+        sock.close()
+        return False
+
+    # 等待服务端超时关闭（不发任何帧）
+    try:
+        frame, _ = recv_frame(sock)
+        if frame is not None and frame["opcode"] == 0x08:
+            print("PASS: WebSocket 空闲超时后收到服务端关闭帧")
+            sock.close()
+            return True
+        else:
+            print(f"FAIL: 超时后未收到关闭帧，opcode={frame['opcode'] if frame else 'None'}")
+            sock.close()
+            return False
+    except socket.timeout:
+        print("FAIL: 等待超时关闭时本地 socket 超时")
+        sock.close()
+        return False
+
+
 if __name__ == "__main__":
     passed = 0
     failed = 0
 
-    if test_handshake():
-        passed += 1
-    else:
-        failed += 1
+    # 支持命令行参数：--timeout-test 只运行超时测试（用于短超时服务器）
+    timeout_test_only = len(sys.argv) > 1 and sys.argv[1] == "--timeout-test"
 
-    if test_echo():
-        passed += 1
-    else:
-        failed += 1
+    if not timeout_test_only:
+        if test_handshake():
+            passed += 1
+        else:
+            failed += 1
+
+        if test_echo():
+            passed += 1
+        else:
+            failed += 1
+
+    # 超时测试只在 --timeout-test 模式下运行（需要服务器配置短超时）
+    if timeout_test_only:
+        if test_timeout():
+            passed += 1
+        else:
+            failed += 1
 
     print(f"\n通过: {passed}, 失败: {failed}")
     sys.exit(0 if failed == 0 else 1)

@@ -27,6 +27,7 @@
 #include <sys/sendfile.h> /* sendfile */
 #include <signal.h>     /* sigaction */
 #include <sys/socket.h> /* send */
+#include <poll.h>       /* poll */
 
 /**
  * POSIX socket 子系统无需显式初始化。
@@ -71,6 +72,17 @@ ssize_t cocoon_socket_send(cocoon_socket_t fd, const char *buf, size_t len) {
 
 ssize_t cocoon_socket_recv(cocoon_socket_t fd, void *buf, size_t len) {
     return read(fd, buf, len);
+}
+
+/**
+ * POSIX 下使用 poll() 等待 socket 可读或超时。
+ */
+int cocoon_socket_poll_readable(cocoon_socket_t fd, int timeout_ms) {
+    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+    int ret = poll(&pfd, 1, timeout_ms);
+    if (ret > 0) return 1;
+    if (ret == 0) return 0;
+    return -1;
 }
 
 /**
@@ -328,6 +340,20 @@ ssize_t cocoon_socket_recv(cocoon_socket_t fd, void *buf, size_t len) {
         return -1;
     }
     return (ssize_t)r;
+}
+
+/**
+ * Windows 下使用 select() 等待 socket 可读或超时。
+ */
+int cocoon_socket_poll_readable(cocoon_socket_t fd, int timeout_ms) {
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(fd, &fds);
+    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+    int ret = select(0, &fds, NULL, NULL, timeout_ms < 0 ? NULL : &tv);
+    if (ret > 0) return 1;
+    if (ret == 0) return 0;
+    return -1;
 }
 
 /**

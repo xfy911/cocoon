@@ -8,6 +8,7 @@
 
 #include "websocket.h"
 #include "log.h"
+#include "platform.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -375,8 +376,6 @@ static ssize_t ws_read_data(int fd, uint8_t *buf, size_t max_len) {
 }
 
 void ws_handle_connection(int fd, uint32_t timeout_ms, const char *path) {
-    (void)timeout_ms; /* TODO: 超时处理 */
-
     uint8_t buf[8192];
     size_t buf_len = 0;
     bool closed = false;
@@ -387,6 +386,21 @@ void ws_handle_connection(int fd, uint32_t timeout_ms, const char *path) {
     log_info("WebSocket 连接建立 fd=%d path=%s", fd, path ? path : "(default)");
 
     while (!closed) {
+        /* 等待数据可读或超时 */
+        if (timeout_ms > 0) {
+            int ret = cocoon_socket_poll_readable(fd, (int)timeout_ms);
+            if (ret == 0) {
+                log_info("WebSocket fd=%d 空闲超时 (%u ms)，关闭连接", fd, timeout_ms);
+                ws_send_close(fd, 1001, "Idle timeout");
+                closed = true;
+                break;
+            }
+            if (ret < 0) {
+                log_debug("WebSocket fd=%d poll 错误: %s", fd, cocoon_strerror(cocoon_get_last_error()));
+                break;
+            }
+        }
+
         ssize_t n = ws_read_data(fd, buf + buf_len, sizeof(buf) - buf_len);
         if (n <= 0) {
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {

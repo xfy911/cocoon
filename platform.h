@@ -345,7 +345,17 @@ void cocoon_dir_close(cocoon_dir_iter_t *iter);
  */
 void cocoon_signal_setup(void (*handler)(int));
 
-/* ========== 系统信息 API ========== */
+/**
+ * cocoon_socket_poll_readable - 等待 socket 可读或超时
+ *
+ * POSIX: poll() + POLLIN
+ * Windows: select() + fd_set（readfds）
+ *
+ * @param fd socket 描述符
+ * @param timeout_ms 超时毫秒（-1 表示无限等待）
+ * @return 1 可读，0 超时，-1 错误
+ */
+int cocoon_socket_poll_readable(cocoon_socket_t fd, int timeout_ms);
 
 /**
  * cocoon_cpu_count - 获取 CPU 逻辑核心数

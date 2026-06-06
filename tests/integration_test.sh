@@ -920,13 +920,34 @@ echo "=== WebSocket 测试 ==="
 if python3 "$ROOT/../websocket_test.py" > "$TMPDIR/ws_test.log" 2>&1; then
     echo "  ✓ WebSocket 握手 + echo — 通过"
     pass
-    pass
 else
     echo "  ✗ WebSocket 测试失败"
     cat "$TMPDIR/ws_test.log"
     fail
+fi
+
+# WebSocket 空闲超时测试（启动短超时服务器）
+kill_server
+sleep 1
+$SERVER -r "$ROOT" -p 9999 -o 2000 > "$TMPDIR/server_ws_timeout.log" 2>&1 &
+for i in {1..30}; do
+    if nc -z localhost 9999 2>/dev/null; then break; fi
+    sleep 0.1
+done
+
+if python3 "$ROOT/../websocket_test.py" --timeout-test > "$TMPDIR/ws_timeout.log" 2>&1; then
+    echo "  ✓ WebSocket 空闲超时 (2s) — 通过"
+    pass
+else
+    echo "  ✗ WebSocket 空闲超时测试失败"
+    cat "$TMPDIR/ws_timeout.log"
     fail
 fi
+kill_server
+
+# 恢复默认服务器用于后续测试
+sleep 1
+start_server
 
 echo ""
 echo "=== 结果汇总 ==="

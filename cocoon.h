@@ -28,6 +28,7 @@
  *
  * 命令行参数解析后的配置。
  */#define COCOON_MAX_PLUGINS 8   /**< 最大插件数量 */
+#define COCOON_MAX_PROXY_RULES 8 /**< 最大代理规则数量 */
 
 typedef struct cocoon_config {
     const char *root_dir;       /**< 静态资源根目录 */
@@ -51,6 +52,12 @@ typedef struct cocoon_config {
     /* 插件配置 */
     const char *plugins[COCOON_MAX_PLUGINS]; /**< 插件路径列表 */
     size_t      num_plugins;                   /**< 插件数量 */
+    /* 代理配置 */
+    struct {
+        char prefix[256];
+        char target[256];
+    } proxies[COCOON_MAX_PROXY_RULES];
+    size_t num_proxies;
 } cocoon_config_t;
 
 /* === 服务器生命周期 API === */

@@ -28,6 +28,7 @@
 #include "websocket.h"
 #include "platform.h"
 #include "middleware.h"
+#include "proxy.h"
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,11 +63,13 @@ typedef struct {
     struct sockaddr_storage client_addr; /**< 客户端地址 */
     socklen_t       addr_len;       /**< 地址长度 */
     int             response_status; /**< 最后响应的 HTTP 状态码 */
+    server_context_t *ctx;            /**< 服务器上下文（用于访问代理配置） */
 } connection_t;
 struct server_context {
     cocoon_socket_t     listen_fd;    /**< 监听 socket */
     cocoon_config_t     config;       /**< 配置副本 */
     cocoon_middleware_config_t mw_config; /**< 中间件配置（持久化，避免栈变量悬空） */
+    cocoon_proxy_config_t proxy_config; /**< 反向代理配置 */
     volatile int        running;      /**< 运行标志 */
     coco_sched_t       *sched;        /**< 协程调度器 */
 };
@@ -401,6 +404,19 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
                          &req, conn->response_status, -1);
         http_request_free(&req);
         return keep;
+    }
+
+    /* 反向代理检查 */
+    if (conn->ctx && conn->ctx->proxy_config.count > 0) {
+        const cocoon_proxy_rule_t *rule = proxy_match(&conn->ctx->proxy_config, req.path);
+        if (rule) {
+            bool keep = proxy_forward(conn->fd, &req, rule, &conn->client_addr);
+            conn->response_status = 200; /* 代理响应状态由后端决定，这里记录一个通用值 */
+            access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                             &req, conn->response_status, -1);
+            http_request_free(&req);
+            return keep;
+        }
     }
 
     /* 只支持 GET 和 HEAD */
@@ -1033,6 +1049,7 @@ static void accept_loop(void *arg) {
         memcpy(&conn->client_addr, &client_addr, sizeof(client_addr));
         conn->addr_len = addr_len;
         conn->response_status = 0;
+        conn->ctx = ctx;
 
         atomic_fetch_add(&g_active_connections, 1);
         log_debug("新连接 fd=%d，当前活跃连接: %d", client_fd,
@@ -1132,6 +1149,12 @@ server_context_t *server_create(const cocoon_config_t *config) {
     ctx->mw_config.auth_pass    = ctx->config.auth_pass;
     ctx->mw_config.rate_limit   = ctx->config.rate_limit;
     cocoon_middleware_init_builtin(&ctx->mw_config);
+
+    /* 初始化反向代理配置 */
+    proxy_init(&ctx->proxy_config);
+    for (size_t i = 0; i < ctx->config.num_proxies; i++) {
+        proxy_add_rule(&ctx->proxy_config, ctx->config.proxies[i].prefix, ctx->config.proxies[i].target);
+    }
 
     /* 加载插件 */
     for (size_t i = 0; i < ctx->config.num_plugins; i++) {

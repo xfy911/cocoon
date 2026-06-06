@@ -346,6 +346,59 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
             } else {
                 fprintf(stderr, "[Config] 第 %d 行: plugins 期望字符串或数组\n", val.line);
             }
+        } else if (strcmp(key_str, "proxies") == 0) {
+            if (val.type == TOKEN_LBRACKET) {
+                /* 解析对象数组 */
+                while (1) {
+                    token_t item = parser_next_token(&p);
+                    if (item.type == TOKEN_RBRACKET) break;
+                    if (item.type == TOKEN_LBRACE) {
+                        char prefix[256] = {0};
+                        char target[256] = {0};
+                        /* 解析对象内的键值对 */
+                        while (1) {
+                            token_t pkey = parser_next_token(&p);
+                            if (pkey.type == TOKEN_RBRACE) break;
+                            if (pkey.type != TOKEN_STRING) {
+                                fprintf(stderr, "[Config] 第 %d 行: proxy 对象期望字符串键\n", pkey.line);
+                                break;
+                            }
+                            if (!token_expect(&p, TOKEN_COLON)) break;
+                            token_t pval = parser_next_token(&p);
+                            char *pk = token_str_dup(&pkey);
+                            if (strcmp(pk, "prefix") == 0 && pval.type == TOKEN_STRING) {
+                                char *v = token_str_dup(&pval);
+                                if (v) { strncpy(prefix, v, sizeof(prefix)-1); free(v); }
+                            } else if (strcmp(pk, "target") == 0 && pval.type == TOKEN_STRING) {
+                                char *v = token_str_dup(&pval);
+                                if (v) { strncpy(target, v, sizeof(target)-1); free(v); }
+                            }
+                            free(pk);
+                            token_t psep = parser_next_token(&p);
+                            if (psep.type == TOKEN_RBRACE) break;
+                            if (psep.type != TOKEN_COMMA) {
+                                fprintf(stderr, "[Config] 第 %d 行: proxy 对象期望 ',' 或 '}'\n", psep.line);
+                                break;
+                            }
+                        }
+                        if (prefix[0] && target[0] && config->num_proxies < COCOON_MAX_PROXY_RULES) {
+                            strncpy(config->proxies[config->num_proxies].prefix, prefix, sizeof(config->proxies[0].prefix)-1);
+                            strncpy(config->proxies[config->num_proxies].target, target, sizeof(config->proxies[0].target)-1);
+                            config->num_proxies++;
+                        }
+                    } else {
+                        fprintf(stderr, "[Config] 第 %d 行: proxies 数组期望对象项\n", item.line);
+                    }
+                    token_t sep = parser_next_token(&p);
+                    if (sep.type == TOKEN_RBRACKET) break;
+                    if (sep.type != TOKEN_COMMA) {
+                        fprintf(stderr, "[Config] 第 %d 行: proxies 数组期望 ',' 或 ']'\n", sep.line);
+                        break;
+                    }
+                }
+            } else {
+                fprintf(stderr, "[Config] 第 %d 行: proxies 期望数组\n", val.line);
+            }
         } /* 其他字段：忽略（未来扩展预留） */
 
         free(key_str);

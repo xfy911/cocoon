@@ -9,5 +9,8 @@
     "gzip_enabled": true,
     "brotli_enabled": true,
     "plugins": ["plugins/hello.so"],
-    "access_log": "-"
+    "access_log": "-",
+    "proxies": [
+        {"prefix": "/api", "target": "http://localhost:3000"}
+    ]
 }

@@ -950,6 +950,73 @@ sleep 1
 start_server
 
 echo ""
+echo "=== 反向代理测试 ==="
+
+# 使用带代理配置的服务器测试
+kill_server
+sleep 1
+
+# 启动一个后端服务器（Python http.server）
+python3 -m http.server 9000 --directory "$ROOT" > "$TMPDIR/backend.log" 2>&1 &
+BACKEND_PID=$!
+sleep 1
+
+# 创建带代理配置的配置文件
+PROXY_CONFIG="$TMPDIR/proxy_config.json"
+cat > "$PROXY_CONFIG" << 'EOF'
+{
+    "root_dir": "./tests/fixtures",
+    "port": 9999,
+    "log_level": "debug",
+    "proxies": [
+        {"prefix": "/backend", "target": "http://localhost:9000"}
+    ]
+}
+EOF
+
+$SERVER -c "$PROXY_CONFIG" > "$TMPDIR/server_proxy.log" 2>&1 &
+for i in {1..30}; do
+    if nc -z localhost 9999 2>/dev/null; then break; fi
+    sleep 0.1
+done
+
+proxy_status=$(curl -s -o /dev/null -w "%{http_code}" "http://$HOST/backend/index.html")
+if [[ "$proxy_status" == "200" ]]; then
+    echo "  ✓ 反向代理 GET — HTTP 200"
+    pass
+else
+    echo "  ✗ 反向代理 GET — 期望 200, 实际 $proxy_status"
+    fail
+fi
+
+proxy_body=$(curl -s "http://$HOST/backend/index.html")
+if echo "$proxy_body" | grep -q "Cocoon"; then
+    echo "  ✓ 反向代理响应体 — 包含后端内容"
+    pass
+else
+    echo "  ✗ 反向代理响应体 — 未包含后端内容"
+    fail
+fi
+
+# 非代理路径仍走静态文件
+static_status=$(curl -s -o /dev/null -w "%{http_code}" "http://$HOST/index.html")
+if [[ "$static_status" == "200" ]]; then
+    echo "  ✓ 非代理路径 — 静态文件正常 HTTP 200"
+    pass
+else
+    echo "  ✗ 非代理路径 — 期望 200, 实际 $static_status"
+    fail
+fi
+
+# 清理后端服务器
+kill -9 $BACKEND_PID 2>/dev/null || true
+
+# 恢复默认服务器
+kill_server
+sleep 1
+start_server
+
+echo ""
 echo "=== 结果汇总 ==="
 echo "通过: $PASS"
 echo "失败: $FAIL"

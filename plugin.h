@@ -69,6 +69,16 @@ int cocoon_plugin_load(const char *path);
 void cocoon_plugin_unload_all(void);
 
 /**
+ * cocoon_plugin_reload - 热重载所有插件
+ *
+ * 先卸载所有已加载插件，再按存储的路径重新加载。
+ * 用于开发调试场景（通过 SIGUSR1 触发）。
+ *
+ * @return 0 成功，-1 失败
+ */
+int cocoon_plugin_reload(void);
+
+/**
  * cocoon_plugin_count - 获取当前已加载的插件数量
  */
 size_t cocoon_plugin_count(void);

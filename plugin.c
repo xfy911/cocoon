@@ -26,6 +26,20 @@ typedef struct {
 
 static plugin_entry_t g_plugins[MAX_PLUGINS];
 static size_t g_plugin_count = 0;
+/* 存储已加载的插件路径，用于热重载 */
+static char g_plugin_paths[MAX_PLUGINS][256];
+static size_t g_plugin_path_count = 0;
+
+/**
+ * plugin_store_path - 保存插件路径到重载列表
+ */
+static void plugin_store_path(const char *path) {
+    if (g_plugin_path_count < MAX_PLUGINS) {
+        strncpy(g_plugin_paths[g_plugin_path_count], path, sizeof(g_plugin_paths[0]) - 1);
+        g_plugin_paths[g_plugin_path_count][sizeof(g_plugin_paths[0]) - 1] = '\0';
+        g_plugin_path_count++;
+    }
+}
 
 /**
  * cocoon_plugin_load - 加载一个插件
@@ -74,6 +88,9 @@ int cocoon_plugin_load(const char *path) {
     entry->path[sizeof(entry->path) - 1] = '\0';
     g_plugin_count++;
 
+    /* 同时保存路径用于重载 */
+    plugin_store_path(path);
+
     log_info("plugin: 已加载 %s (v%s, #%zu)", path, ver_str, g_plugin_count);
     return 0;
 }
@@ -92,6 +109,33 @@ void cocoon_plugin_unload_all(void) {
         log_info("plugin: 已卸载 %s", entry->path);
     }
     g_plugin_count = 0;
+}
+
+/**
+ * cocoon_plugin_reload - 热重载所有插件
+ *
+ * 先卸载所有插件，再按存储路径重新加载。
+ */
+int cocoon_plugin_reload(void) {
+    if (g_plugin_path_count == 0) {
+        log_warn("plugin: 没有存储的插件路径，无法重载");
+        return 0; /* 没有插件也算成功 */
+    }
+
+    log_info("plugin: 开始热重载 %zu 个插件...", g_plugin_path_count);
+    cocoon_plugin_unload_all();
+    /* 保留路径，重新加载 */
+    size_t success = 0;
+    for (size_t i = 0; i < g_plugin_path_count; i++) {
+        if (cocoon_plugin_load(g_plugin_paths[i]) == 0) {
+            success++;
+        } else {
+            log_error("plugin: 重载失败 %s", g_plugin_paths[i]);
+        }
+    }
+
+    log_info("plugin: 热重载完成，%zu/%zu 成功", success, g_plugin_path_count);
+    return (success == g_plugin_path_count) ? 0 : -1;
 }
 
 /**

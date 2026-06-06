@@ -886,6 +886,30 @@ if gcc -Wall -Wextra -fPIC -shared -I. -Icoco/include -o "$TMPDIR/hello_plugin.s
         echo "  ✗ 插件日志 — 未找到加载日志"
         fail
     fi
+
+    # 测试插件热重载
+    PLUGIN_PID=$(pgrep -f "cocoon.*--plugin.*hello_plugin.so" 2>/dev/null || true)
+    if [[ -n "$PLUGIN_PID" ]]; then
+        kill -USR1 "$PLUGIN_PID" 2>/dev/null
+        sleep 0.5
+        plugin_http_after=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/")
+        if [[ "$plugin_http_after" == "200" ]]; then
+            echo "  ✓ 插件热重载 — SIGUSR1 后服务器正常响应 HTTP 200"
+            pass
+        else
+            echo "  ✗ 插件热重载 — 期望 200, 实际 $plugin_http_after"
+            fail
+        fi
+        if grep -q "热重载" "$TMPDIR/server_plugin.log"; then
+            echo "  ✓ 插件热重载日志 — 热重载日志正确输出"
+            pass
+        else
+            echo "  ✗ 插件热重载日志 — 未找到热重载日志"
+            fail
+        fi
+    else
+        echo "  ⊘ 插件热重载 — 无法获取服务器 PID"
+    fi
 else
     echo "  ⊘ 插件编译跳过（无编译器）"
 fi

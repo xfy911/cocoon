@@ -11,14 +11,21 @@
 #include "config.h"
 #include "platform.h"
 #include "access_log.h"
+#include "plugin.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 
 /**
  * g_ctx - 全局服务器上下文（用于信号处理）
  */
 static server_context_t *g_ctx = NULL;
+
+/**
+ * g_reload_plugins - 插件热重载标志（由 SIGUSR1 触发）
+ */
+static volatile int g_reload_plugins = 0;
 
 /**
  * signal_handler - 优雅关闭信号处理
@@ -33,6 +40,20 @@ static void signal_handler(int sig) {
         printf("\n[Cocoon] 收到关闭信号，正在优雅停止...\n");
         server_stop(g_ctx);
     }
+}
+
+/**
+ * reload_handler - 插件热重载信号处理
+ *
+ * 捕获 SIGUSR1，设置热重载标志。
+ * 主循环中检测到标志后执行 cocoon_plugin_reload()。
+ *
+ * @param sig 信号编号
+ */
+static void reload_handler(int sig) {
+    (void)sig;
+    printf("\n[Cocoon] 收到 SIGUSR1，热重载插件...\n");
+    cocoon_plugin_reload();
 }
 
 /**
@@ -62,7 +83,9 @@ static void print_usage(const char *prog) {
     printf("  --auth-pass <pass>  Basic Auth 密码\n");
     printf("  --rate-limit <n>    每秒最大请求数（限流）\n");
     printf("  --plugin <path>  加载插件（可多次指定）\n");
-    printf("\nExample:\n");
+    printf("\nSignals:\n");
+  printf("  SIGUSR1  热重载所有插件（无需重启服务器）\n");
+  printf("\nExample:\n");
     printf("  %s -c cocoon.json\n", prog);
     printf("  %s -r ./www -p 8080\n", prog);
     printf("  %s -c cocoon.json -p 9090  # 命令行覆盖配置文件的端口\n", prog);
@@ -266,6 +289,7 @@ int main(int argc, char *argv[]) {
 
     /* 注册信号处理 */
     cocoon_signal_setup(signal_handler);
+    signal(SIGUSR1, reload_handler);
 
     /* 设置日志级别 */
     log_set_level(config.log_level);

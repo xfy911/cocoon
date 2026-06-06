@@ -11,6 +11,8 @@
 #include "static.h"
 #include "log.h"
 #include "tls.h"
+#include "multipart.h"
+#include "platform.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -145,6 +147,7 @@ static ssize_t http2_data_source_read_callback(nghttp2_session *session, int32_t
 static bool http2_serve_directory(http2_session_t *h2, http2_stream_data_t *stream,
                                    const char *real_path, const char *request_path);
 static void http2_serve_static(http2_session_t *h2, http2_stream_data_t *stream);
+static void http2_serve_post(http2_session_t *h2, http2_stream_data_t *stream);
 
 /* ===================== 会话管理 ===================== */
 
@@ -629,8 +632,13 @@ static int on_frame_recv_callback(nghttp2_session *session,
             }
             stream->request_complete = true;
 
-            /* 处理静态文件请求 */
-            http2_serve_static(h2, stream);
+            /* 根据请求方法选择处理方式 */
+            if (stream->request.method == HTTP_POST) {
+                http2_serve_post(h2, stream);
+            } else {
+                /* 处理静态文件请求（GET/HEAD/OPTIONS等） */
+                http2_serve_static(h2, stream);
+            }
             http2_send_pending(h2);
         }
         break;
@@ -701,9 +709,18 @@ static int on_data_chunk_recv_callback(nghttp2_session *session __attribute__((u
         return 0;
     }
 
-    /* TODO: 将数据追加到请求体缓冲区 */
-    (void)data;
-    (void)len;
+    /* 收集请求体数据 */
+    if (stream->request.body_len + len > HTTP_MAX_BODY) {
+        return 0; /* 超过最大限制，静默丢弃 */
+    }
+    char *new_body = (char *)realloc(stream->request.body, stream->request.body_len + len + 1);
+    if (!new_body) {
+        return 0; /* 内存不足，静默丢弃 */
+    }
+    memcpy(new_body + stream->request.body_len, data, len);
+    stream->request.body_len += len;
+    new_body[stream->request.body_len] = '\0';
+    stream->request.body = new_body;
 
     return 0;
 }
@@ -1002,6 +1019,144 @@ static bool http2_serve_directory(http2_session_t *h2, http2_stream_data_t *stre
     }
 
     return true;
+}
+
+/**
+ * http2_serve_post - 处理 HTTP/2 POST 请求
+ *
+ * 支持 multipart/form-data 文件上传、JSON 回显和表单回显。
+ * 构建 JSON 响应并通过 nghttp2 发送。
+ *
+ * @param h2 会话指针
+ * @param stream 流数据（含请求信息）
+ */
+static void http2_serve_post(http2_session_t *h2, http2_stream_data_t *stream) {
+    char response[4096];
+    int n = 0;
+
+    /* multipart/form-data 文件上传 */
+    if (strstr(stream->request.content_type, "multipart/form-data") != NULL) {
+        char boundary[256];
+        if (!multipart_extract_boundary(stream->request.content_type, boundary, sizeof(boundary))) {
+            nghttp2_nv hdrs[] = {
+                {(uint8_t *)":status", (uint8_t *)"400", 7, 3, 0}};
+            nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+            return;
+        }
+
+        multipart_part_t *parts = NULL;
+        int num_parts = 0;
+        if (multipart_parse(stream->request.body, stream->request.body_len, boundary, &parts, &num_parts) != 0) {
+            nghttp2_nv hdrs[] = {
+                {(uint8_t *)":status", (uint8_t *)"400", 7, 3, 0}};
+            nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+            return;
+        }
+
+        n += snprintf(response + n, sizeof(response) - n,
+            "{\"method\":\"%s\",\"path\":\"%s\",\"uploaded\":%d,\"files\":[",
+            http_method_str(stream->request.method), stream->request.path, num_parts);
+
+        int files_saved = 0;
+        for (int i = 0; i < num_parts; i++) {
+            if (parts[i].filename && parts[i].filename[0] && parts[i].data_len > 0) {
+                char upload_dir[4096];
+                int r = snprintf(upload_dir, sizeof(upload_dir), "%s/uploads", h2->root_dir);
+                if (r > 0 && r < (int)sizeof(upload_dir)) {
+                    cocoon_mkdir(upload_dir);
+                    char file_path[4096];
+                    r = snprintf(file_path, sizeof(file_path), "%s/%s", upload_dir, parts[i].filename);
+                    if (r > 0 && r < (int)sizeof(file_path)) {
+                        FILE *fp = fopen(file_path, "wb");
+                        if (fp) {
+                            fwrite(parts[i].data, 1, parts[i].data_len, fp);
+                            fclose(fp);
+                            files_saved++;
+                            if (files_saved > 1) {
+                                n += snprintf(response + n, sizeof(response) - n, ",");
+                            }
+                            n += snprintf(response + n, sizeof(response) - n,
+                                "{\"field\":\"%s\",\"filename\":\"%s\",\"size\":%zu,\"path\":\"%s\"}",
+                                parts[i].name ? parts[i].name : "",
+                                parts[i].filename,
+                                parts[i].data_len,
+                                file_path);
+                        }
+                    }
+                }
+            }
+        }
+
+        n += snprintf(response + n, sizeof(response) - n, "]}");
+        multipart_parts_free(parts, num_parts);
+    } else {
+        /* JSON / form-urlencoded 回显 */
+        n += snprintf(response + n, sizeof(response) - n,
+            "{\"method\":\"%s\",\"path\":\"%s\",\"content_type\":\"%s\",\"body_length\":%zu",
+            http_method_str(stream->request.method), stream->request.path,
+            stream->request.content_type, stream->request.body_len);
+
+        if (stream->request.body_len > 0) {
+            if (strstr(stream->request.content_type, "application/json") != NULL) {
+                n += snprintf(response + n, sizeof(response) - n, ",\"body\": ");
+                size_t body_copy = stream->request.body_len;
+                if (body_copy > sizeof(response) - n - 64) {
+                    body_copy = sizeof(response) - n - 64;
+                }
+                memcpy(response + n, stream->request.body, body_copy);
+                n += (int)body_copy;
+                n += snprintf(response + n, sizeof(response) - n, "}");
+            } else if (strstr(stream->request.content_type, "x-www-form-urlencoded") != NULL) {
+                n += snprintf(response + n, sizeof(response) - n, ",\"body\":\"");
+                size_t body_copy = stream->request.body_len;
+                if (body_copy > sizeof(response) - n - 64) {
+                    body_copy = sizeof(response) - n - 64;
+                }
+                memcpy(response + n, stream->request.body, body_copy);
+                n += (int)body_copy;
+                n += snprintf(response + n, sizeof(response) - n, "\"}");
+            } else {
+                n += snprintf(response + n, sizeof(response) - n, "}");
+            }
+        } else {
+            n += snprintf(response + n, sizeof(response) - n, "}");
+        }
+    }
+
+    /* 存储响应到流 */
+    stream->response_body = (char *)malloc(n);
+    if (!stream->response_body) {
+        nghttp2_nv hdrs[] = {
+            {(uint8_t *)":status", (uint8_t *)"500", 7, 3, 0}};
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+        return;
+    }
+    memcpy(stream->response_body, response, n);
+    stream->response_len = (size_t)n;
+    stream->response_sent = 0;
+
+    /* 构建响应头 */
+    nghttp2_nv hdrs[8];
+    int num_hdrs = 0;
+
+    hdrs[num_hdrs++] = (nghttp2_nv){
+        (uint8_t *)":status", (uint8_t *)"200", 7, 3, 0};
+
+    hdrs[num_hdrs++] = (nghttp2_nv){
+        (uint8_t *)"content-type", (uint8_t *)"application/json", 12, 16, 0};
+
+    char content_length_str[32];
+    snprintf(content_length_str, sizeof(content_length_str), "%d", n);
+    hdrs[num_hdrs++] = (nghttp2_nv){
+        (uint8_t *)"content-length", (uint8_t *)content_length_str, 14, strlen(content_length_str), 0};
+
+    hdrs[num_hdrs++] = (nghttp2_nv){
+        (uint8_t *)"server", (uint8_t *)"Cocoon/1.0", 6, 10, 0};
+
+    nghttp2_data_provider provider;
+    provider.source.ptr = stream;
+    provider.read_callback = http2_data_source_read_callback;
+    nghttp2_submit_response(h2->session, stream->stream_id, hdrs, num_hdrs, &provider);
 }
 
 /**

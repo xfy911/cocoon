@@ -953,9 +953,6 @@ static void accept_loop(void *arg) {
         log_info("单线程模式");
     }
     log_info("静态资源根目录: %s", ctx->config.root_dir);
-    log_info("coco 协程库版本: %s", coco_version());
-    log_info("coco 协程库版本: %s", coco_version());
-    log_info("coco 协程库版本: %s", coco_version());
 
     if (ctx->config.max_connections > 0) {
         log_info("最大并发连接数: %u", ctx->config.max_connections);

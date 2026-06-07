@@ -953,6 +953,9 @@ static void accept_loop(void *arg) {
         log_info("单线程模式");
     }
     log_info("静态资源根目录: %s", ctx->config.root_dir);
+    log_info("coco 协程库版本: %s", coco_version());
+    log_info("coco 协程库版本: %s", coco_version());
+    log_info("coco 协程库版本: %s", coco_version());
 
     if (ctx->config.max_connections > 0) {
         log_info("最大并发连接数: %u", ctx->config.max_connections);
@@ -1056,12 +1059,17 @@ static void accept_loop(void *arg) {
                   atomic_load(&g_active_connections));
 
         if (ctx->config.threaded) {
-            /* 多线程模式：使用 coco_go_with_opts 创建工作协程，128KB 栈 */
+            /* 多线程模式：使用 coco_go_with_opts 创建工作协程
+             * stack_size = 0 使用默认栈（共享热栈，128KB，自动复用）
+             * p_id = client_fd % num_workers 按连接哈希绑定到固定 P，
+             * 提升 CPU 缓存局部性，减少跨核迁移
+             */
+            uint32_t worker_idx = client_fd % num_workers;
             coco_go_opts_t opts = {
-                .stack_size = 1024 * 1024,
+                .stack_size = 0,   /* 默认：使用共享热栈 */
                 .context = NULL,
                 .priority = -1,
-                .p_id = -1
+                .p_id = (int)worker_idx
             };
             coco_coro_t *coro = coco_go_with_opts(client_handler, conn, &opts);
             if (!coro) {

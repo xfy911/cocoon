@@ -689,7 +689,7 @@ static int on_stream_close_callback(nghttp2_session *session __attribute__((unus
 /**
  * on_data_chunk_recv_callback - DATA 帧数据块接收回调
  *
- * 目前为占位实现，TODO：将请求体数据追加到流缓冲区。
+ * 将请求体数据追加到流缓冲区。支持 Content-Length 和分块传输。
  *
  * @param session nghttp2 会话（未使用）
  * @param flags 标志（未使用）

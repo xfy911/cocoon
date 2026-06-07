@@ -51,6 +51,13 @@ typedef struct {
 
 /* === 内部：parser 辅助函数 === */
 
+/**
+ * parser_init - 初始化 JSON 解析器
+ *
+ * @param p 解析器状态结构
+ * @param src JSON 源字符串
+ * @param len 源字符串长度
+ */
 static void parser_init(parser_t *p, const char *src, size_t len) {
     p->src = src;
     p->pos = 0;
@@ -58,6 +65,13 @@ static void parser_init(parser_t *p, const char *src, size_t len) {
     p->line = 1;
 }
 
+/**
+ * parser_skip_ws - 跳过空白字符和注释
+ *
+ * 支持空格、制表符、换行，以及 // 行注释。
+ *
+ * @param p 解析器状态结构
+ */
 static void parser_skip_ws(parser_t *p) {
     while (p->pos < p->len) {
         char c = p->src[p->pos];
@@ -76,6 +90,15 @@ static void parser_skip_ws(parser_t *p) {
     }
 }
 
+/**
+ * parser_next_token - 读取下一个 JSON token
+ *
+ * 支持的 token 类型：字符串、数字、true、false、
+ * 以及各种分隔符（{ } [ ] , :）。
+ *
+ * @param p 解析器状态结构
+ * @return 下一个 token
+ */
 static token_t parser_next_token(parser_t *p) {
     parser_skip_ws(p);
     token_t t = {TOKEN_INVALID, NULL, 0, p->line};
@@ -139,12 +162,26 @@ static token_t parser_next_token(parser_t *p) {
     }
 }
 
+/**
+ * token_expect - 期望下一个 token 为指定类型
+ *
+ * @param p 解析器状态结构
+ * @param expected 期望的 token 类型
+ * @return true 匹配，false 不匹配
+ */
 static bool token_expect(parser_t *p, token_type_t expected) {
     token_t t = parser_next_token(p);
     return t.type == expected;
 }
 
-/* 复制 token 内容为 C 字符串（处理转义） */
+/**
+ * token_str_dup - 将字符串 token 复制为 C 字符串
+ *
+ * 处理 JSON 字符串中的转义序列（\n \t \r \\ \"）。
+ *
+ * @param t 字符串 token
+ * @return 新分配的 C 字符串，调用者负责释放；失败返回 NULL
+ */
 static char *token_str_dup(const token_t *t) {
     char *buf = (char *)malloc(t->len + 1);
     if (!buf) return NULL;
@@ -169,6 +206,12 @@ static char *token_str_dup(const token_t *t) {
     return buf;
 }
 
+/**
+ * token_to_long - 将数字 token 转换为长整型
+ *
+ * @param t 数字 token
+ * @return 转换后的数值
+ */
 static long token_to_long(const token_t *t) {
     char buf[32] = {0};
     size_t n = t->len < 31 ? t->len : 31;
@@ -176,6 +219,12 @@ static long token_to_long(const token_t *t) {
     return strtol(buf, NULL, 10);
 }
 
+/**
+ * str_to_log_level - 将字符串转换为日志级别
+ *
+ * @param str 日志级别字符串（error/warn/info/debug）
+ * @return 对应的日志级别枚举值，无效时返回 LOG_LEVEL_INFO
+ */
 static log_level_t str_to_log_level(const char *str) {
     if (strcmp(str, "error") == 0) return LOG_LEVEL_ERROR;
     if (strcmp(str, "warn") == 0) return LOG_LEVEL_WARN;
@@ -186,6 +235,21 @@ static log_level_t str_to_log_level(const char *str) {
 
 /* === 公共 API === */
 
+/**
+ * config_load_from_file - 从 JSON 配置文件加载配置
+ *
+ * 解析 cocoon.json 格式，支持以下字段：
+ *   root_dir, port, threaded, num_workers, max_connections, timeout_ms,
+ *   log_level, gzip_enabled, brotli_enabled, tls_cert, tls_key, tls_enabled,
+ *   access_log, cors_enabled, auth_user, auth_pass, rate_limit,
+ *   plugins（字符串或数组）, proxies（对象数组）
+ *
+ * 未知字段将被静默忽略，便于向后兼容。
+ *
+ * @param path 配置文件路径
+ * @param config 输出配置结构体
+ * @return true 成功，false 失败（会输出错误信息到 stderr）
+ */
 bool config_load_from_file(const char *path, cocoon_config_t *config) {
     if (!path || !config) return false;
 
@@ -423,6 +487,32 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
     return true;
 }
 
+/**
+ * config_merge - 将命令行参数合并到基础配置
+ *
+ * 命令行显式指定的值覆盖配置文件中的值。
+ * 对于字符串字段，会释放旧值并复制新值。
+ *
+ * @param base 基础配置（通常来自配置文件）
+ * @param cmdline 命令行配置
+ * @param has_root_dir  是否显式指定 root_dir
+ * @param has_port      是否显式指定 port
+ * @param has_workers   是否显式指定 num_workers
+ * @param has_max_conn  是否显式指定 max_connections
+ * @param has_timeout   是否显式指定 timeout_ms
+ * @param has_log_level 是否显式指定 log_level
+ * @param has_gzip_enabled    是否显式指定 gzip_enabled
+ * @param has_brotli_enabled  是否显式指定 brotli_enabled
+ * @param has_tls_cert  是否显式指定 tls_cert
+ * @param has_tls_key   是否显式指定 tls_key
+ * @param has_tls_enabled 是否显式指定 tls_enabled
+ * @param has_access_log 是否显式指定 access_log
+ * @param has_cors_enabled 是否显式指定 cors_enabled
+ * @param has_auth_user 是否显式指定 auth_user
+ * @param has_auth_pass 是否显式指定 auth_pass
+ * @param has_rate_limit 是否显式指定 rate_limit
+ * @param has_plugins   是否显式指定 plugins
+ */
 void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
                   bool has_root_dir, bool has_port, bool has_workers,
                   bool has_max_conn, bool has_timeout, bool has_log_level,

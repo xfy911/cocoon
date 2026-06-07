@@ -33,12 +33,27 @@ static tls_conn_t **g_map = NULL;
 static int g_map_cap = 0;
 static SSL_CTX *g_ctx = NULL;
 
-/* 内部：O(1) fd 查表 */
+/**
+ * tls_lookup - 根据 fd 查找 TLS 连接
+ *
+ * O(1) 查表，使用动态数组索引。
+ *
+ * @param fd socket 文件描述符
+ * @return TLS 连接结构，未找到返回 NULL
+ */
 static tls_conn_t* tls_lookup(int fd) {
     if (fd >= 0 && fd < g_map_cap) return g_map[fd];
     return NULL;
 }
 
+/**
+ * tls_map_set - 将 fd 与 TLS 连接关联
+ *
+ * 若数组容量不足则自动扩容。
+ *
+ * @param fd socket 文件描述符
+ * @param t TLS 连接结构
+ */
 static void tls_map_set(int fd, tls_conn_t *t) {
     if (fd >= g_map_cap) {
         int old_cap = g_map_cap;
@@ -49,11 +64,25 @@ static void tls_map_set(int fd, tls_conn_t *t) {
     g_map[fd] = t;
 }
 
+/**
+ * tls_map_clear - 清除 fd 与 TLS 连接的关联
+ *
+ * @param fd socket 文件描述符
+ */
 static void tls_map_clear(int fd) {
     if (fd >= 0 && fd < g_map_cap) g_map[fd] = NULL;
 }
 
-/* 内部：从 socket 读取原始数据（协程感知） */
+/**
+ * socket_read - 从 socket 读取原始数据（协程感知）
+ *
+ * 若当前在协程调度器中则使用 coco_read，否则使用标准 read。
+ *
+ * @param fd socket 文件描述符
+ * @param buf 读取缓冲区
+ * @param len 最大读取长度
+ * @return 实际读取字节数，失败返回 -1
+ */
 static ssize_t socket_read(int fd, void *buf, size_t len) {
     if (coco_sched_get_current() != NULL) {
         return coco_read(fd, buf, len);
@@ -61,7 +90,16 @@ static ssize_t socket_read(int fd, void *buf, size_t len) {
     return read(fd, buf, len);
 }
 
-/* 内部：向 socket 写入原始数据 */
+/**
+ * socket_write_all - 向 socket 写入全部数据（协程感知）
+ *
+ * 循环写入直至全部数据发送完毕。若当前在协程调度器中则使用 coco_write。
+ *
+ * @param fd socket 文件描述符
+ * @param buf 数据缓冲区
+ * @param len 数据长度
+ * @return 实际发送字节数，失败返回 -1
+ */
 static ssize_t socket_write_all(int fd, const void *buf, size_t len) {
     if (coco_sched_get_current() != NULL) {
         size_t sent = 0;
@@ -94,7 +132,13 @@ static ssize_t socket_write_all(int fd, const void *buf, size_t len) {
     }
 }
 
-/* 内部：将 write BIO 中的加密数据刷到 socket */
+/**
+ * flush_wbio - 将 write BIO 中的加密数据刷到 socket
+ *
+ * @param fd socket 文件描述符
+ * @param wbio write BIO
+ * @return 0 成功，-1 失败
+ */
 static int flush_wbio(int fd, BIO *wbio) {
     char buf[16384];
     int pending = BIO_read(wbio, buf, sizeof(buf));
@@ -105,7 +149,19 @@ static int flush_wbio(int fd, BIO *wbio) {
     return 0;
 }
 
-/* 内部：ALPN 选择回调，优先选择 h2，否则 http/1.1 */
+/**
+ * tls_alpn_select_cb - ALPN 协议选择回调
+ *
+ * 优先选择 h2（HTTP/2），次选 http/1.1。
+ *
+ * @param ssl SSL 对象（未使用）
+ * @param out 输出选中的协议
+ * @param outlen 输出协议长度
+ * @param in 客户端 ALPN 列表
+ * @param inlen 客户端 ALPN 列表长度
+ * @param arg 用户参数（未使用）
+ * @return SSL_TLSEXT_ERR_OK 成功，SSL_TLSEXT_ERR_NOACK 无匹配
+ */
 static int tls_alpn_select_cb(SSL *ssl __attribute__((unused)), const unsigned char **out,
                                unsigned char *outlen, const unsigned char *in,
                                unsigned int inlen, void *arg __attribute__((unused))) {
@@ -146,6 +202,16 @@ static int tls_alpn_select_cb(SSL *ssl __attribute__((unused)), const unsigned c
 
 /* ===== 公共 API ===== */
 
+/**
+ * tls_create_context - 创建 TLS 服务器上下文
+ *
+ * 初始化 OpenSSL，加载证书和私钥，设置 ALPN 回调。
+ * 最低支持 TLS 1.2。
+ *
+ * @param cert_path 证书文件路径（PEM 格式）
+ * @param key_path 私钥文件路径（PEM 格式）
+ * @return 0 成功，-1 失败
+ */
 int tls_create_context(const char *cert_path, const char *key_path) {
     if (!cert_path || !key_path) return -1;
 
@@ -193,6 +259,11 @@ int tls_create_context(const char *cert_path, const char *key_path) {
     return 0;
 }
 
+/**
+ * tls_destroy_context - 销毁 TLS 上下文并清理所有连接
+ *
+ * 释放 SSL_CTX、所有 TLS 连接映射表项及其关联资源。
+ */
 void tls_destroy_context(void) {
     if (g_ctx) {
         SSL_CTX_free(g_ctx);
@@ -213,10 +284,24 @@ void tls_destroy_context(void) {
     }
 }
 
+/**
+ * tls_has_context - 检查是否已创建 TLS 上下文
+ *
+ * @return true 已创建，false 未创建
+ */
 bool tls_has_context(void) {
     return g_ctx != NULL;
 }
 
+/**
+ * tls_accept - 接受新 TLS 连接并执行握手
+ *
+ * 为指定 fd 创建 TLS 连接对象，执行完整的握手循环。
+ * 使用 Memory BIO 与协程 I/O 集成。
+ *
+ * @param fd socket 文件描述符
+ * @return 0 成功，-1 失败
+ */
 int tls_accept(int fd) {
     if (!g_ctx) return -1;
 
@@ -287,6 +372,16 @@ fail:
     return -1;
 }
 
+/**
+ * tls_read - 从 TLS 连接读取解密数据
+ *
+ * 若 SSL 缓冲区为空，则从 socket 读取加密数据并解密。
+ *
+ * @param fd socket 文件描述符
+ * @param buf 读取缓冲区
+ * @param len 最大读取长度
+ * @return 实际读取字节数，0 对端关闭，-1 错误
+ */
 ssize_t tls_read(int fd, void *buf, size_t len) {
     tls_conn_t *t = tls_lookup(fd);
     if (!t || !t->ssl) return -1;
@@ -315,6 +410,16 @@ ssize_t tls_read(int fd, void *buf, size_t len) {
     }
 }
 
+/**
+ * tls_write - 向 TLS 连接写入数据
+ *
+ * 数据经 SSL 加密后通过 socket 发送。
+ *
+ * @param fd socket 文件描述符
+ * @param buf 数据缓冲区
+ * @param len 数据长度
+ * @return 实际发送字节数，-1 错误
+ */
 ssize_t tls_write(int fd, const void *buf, size_t len) {
     tls_conn_t *t = tls_lookup(fd);
     if (!t || !t->ssl) return -1;
@@ -346,6 +451,13 @@ ssize_t tls_write(int fd, const void *buf, size_t len) {
     return (ssize_t)total;
 }
 
+/**
+ * tls_close - 关闭 TLS 连接并释放资源
+ *
+ * 发送 close_notify，释放 SSL 对象和连接映射。
+ *
+ * @param fd socket 文件描述符
+ */
 void tls_close(int fd) {
     tls_conn_t *t = tls_lookup(fd);
     if (!t) return;
@@ -362,10 +474,22 @@ void tls_close(int fd) {
     free(t);
 }
 
+/**
+ * tls_has_connection - 检查 fd 是否有关联的 TLS 连接
+ *
+ * @param fd socket 文件描述符
+ * @return true 有 TLS 连接，false 无
+ */
 bool tls_has_connection(int fd) {
     return tls_lookup(fd) != NULL;
 }
 
+/**
+ * tls_negotiated_http2 - 检查 ALPN 协商结果是否为 HTTP/2
+ *
+ * @param fd socket 文件描述符
+ * @return true 协商为 h2，false 未协商或为 http/1.1
+ */
 bool tls_negotiated_http2(int fd) {
     tls_conn_t *t = tls_lookup(fd);
     if (!t || !t->ssl) return false;

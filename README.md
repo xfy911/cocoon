@@ -30,6 +30,7 @@
 | 🧩 中间件 | 内置 CORS / Basic Auth / Rate Limit，可自定义注册 |
 | 🔌 插件系统 | 动态加载 .so 插件，SIGUSR1 热重载 |
 | 🏥 健康检查 | `/_health` 端点返回 JSON 服务器状态 |
+| 🔄 反向代理 | HTTP/1.1 + HTTPS 后端转发，路径前缀匹配，X-Forwarded-* 头透传 |
 | 🪟 跨平台 | Linux / macOS / Windows（MinGW/MSVC）|
 
 ## Quick Start
@@ -121,6 +122,36 @@ make test-all
 make bench
 ```
 
+## 配置文件示例
+
+```json
+{
+  "root_dir": "./examples/www",
+  "port": 8080,
+  "threaded": true,
+  "workers": 4,
+  "max_connections": 10000,
+  "timeout_ms": 30000,
+  "log_level": "info",
+  "access_log": "-",
+  "cors_enabled": true,
+  "rate_limit": 100,
+  "plugins": ["plugins/hello.so"],
+  "proxies": [
+    {
+      "prefix": "/api",
+      "target": "http://localhost:3000"
+    },
+    {
+      "prefix": "/secure",
+      "target": "https://api.example.com"
+    }
+  ]
+}
+```
+
+运行：`./cocoon -c cocoon.json`
+
 ## 命令行参数
 
 ```
@@ -185,6 +216,7 @@ Options:
 | `middleware.c` | 中间件注册表 + 内置 CORS / Basic Auth / Rate Limit |
 | `plugin.c` | 动态插件加载 + 热重载 |
 | `platform.c` | 跨平台抽象（Linux/macOS/Windows） |
+| `proxy.c` / `proxy_tls.c` | 反向代理（HTTP/1.1 + HTTPS 后端转发） |
 | `cocoon.h` | 公共配置结构体与错误码定义 |
 
 ## 核心 API 速览
@@ -264,7 +296,7 @@ make bench
 - [x] 插件系统（动态加载 + 热重载）
 - [x] 健康检查端点
 - [x] 跨平台支持（Windows）
-- [ ] 反向代理支持
+- [x] 反向代理支持
 - [ ] 虚拟主机 / 多站点
 
 ## 构建与安装

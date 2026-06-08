@@ -18,6 +18,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <time.h>
+#include <pthread.h>
 
 void proxy_init(cocoon_proxy_config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
@@ -29,6 +30,153 @@ static void backend_init_health(cocoon_proxy_backend_t *backend) {
     backend->fail_count = 0;
     backend->success_count = 0;
     backend->last_check = 0;
+}
+
+void proxy_pool_init(cocoon_proxy_backend_t *backend) {
+    memset(&backend->pool, 0, sizeof(backend->pool));
+    pthread_mutex_init(&backend->pool.mutex, NULL);
+    for (size_t i = 0; i < COCOON_MAX_POOL_SIZE; i++) {
+        backend->pool.conns[i].fd = COCOON_INVALID_SOCKET;
+        backend->pool.conns[i].tls_conn = NULL;
+        backend->pool.conns[i].in_use = false;
+        backend->pool.conns[i].last_used = 0;
+    }
+}
+
+void proxy_pool_destroy(cocoon_proxy_backend_t *backend) {
+    if (!backend) return;
+    pthread_mutex_lock(&backend->pool.mutex);
+    for (size_t i = 0; i < COCOON_MAX_POOL_SIZE; i++) {
+        cocoon_pooled_conn_t *pc = &backend->pool.conns[i];
+        if (pc->fd != COCOON_INVALID_SOCKET) {
+            cocoon_socket_close(pc->fd);
+            pc->fd = COCOON_INVALID_SOCKET;
+        }
+        if (pc->tls_conn) {
+            proxy_tls_close(pc->tls_conn);
+            pc->tls_conn = NULL;
+        }
+        pc->in_use = false;
+    }
+    pthread_mutex_unlock(&backend->pool.mutex);
+    pthread_mutex_destroy(&backend->pool.mutex);
+}
+
+/* proxy_connect_backend 前向声明 */
+static cocoon_socket_t proxy_connect_backend(const cocoon_proxy_backend_t *backend);
+
+bool proxy_pool_acquire(cocoon_proxy_backend_t *backend, cocoon_socket_t *pfd, proxy_tls_conn_t **ptls) {
+    if (!backend || !pfd || !ptls) return false;
+
+    bool use_https = backend->target_https;
+    time_t now = time(NULL);
+
+    pthread_mutex_lock(&backend->pool.mutex);
+
+    /* 1. 查找可用空闲连接（未超时） */
+    for (size_t i = 0; i < COCOON_MAX_POOL_SIZE; i++) {
+        cocoon_pooled_conn_t *pc = &backend->pool.conns[i];
+        if (pc->in_use) continue;
+        if (pc->fd == COCOON_INVALID_SOCKET && !pc->tls_conn) continue;
+
+        /* 检查超时 */
+        if ((now - pc->last_used) * 1000 > COCOON_POOL_IDLE_TIMEOUT_MS) {
+            /* 超时，关闭旧连接 */
+            if (pc->fd != COCOON_INVALID_SOCKET) {
+                cocoon_socket_close(pc->fd);
+                pc->fd = COCOON_INVALID_SOCKET;
+            }
+            if (pc->tls_conn) {
+                proxy_tls_close(pc->tls_conn);
+                pc->tls_conn = NULL;
+            }
+            continue;
+        }
+
+        /* 标记为使用中 */
+        pc->in_use = true;
+        pc->last_used = now;
+        *pfd = pc->fd;
+        *ptls = pc->tls_conn;
+        pthread_mutex_unlock(&backend->pool.mutex);
+        log_debug("连接池复用: %s:%d (fd=%d, tls=%p)",
+                  backend->target_host, backend->target_port,
+                  (int)pc->fd, (void*)pc->tls_conn);
+        return true;
+    }
+
+    pthread_mutex_unlock(&backend->pool.mutex);
+
+    /* 2. 没有可用连接，新建一个 */
+    if (use_https) {
+        proxy_tls_conn_t *tls = proxy_tls_connect(backend->target_host, backend->target_port);
+        if (!tls) {
+            log_warn("连接池新建 TLS 连接失败: %s:%d", backend->target_host, backend->target_port);
+            return false;
+        }
+        *pfd = COCOON_INVALID_SOCKET;
+        *ptls = tls;
+    } else {
+        cocoon_socket_t fd = proxy_connect_backend(backend);
+        if (fd == COCOON_INVALID_SOCKET) {
+            log_warn("连接池新建连接失败: %s:%d", backend->target_host, backend->target_port);
+            return false;
+        }
+        *pfd = fd;
+        *ptls = NULL;
+    }
+
+    log_debug("连接池新建: %s:%d (fd=%d, tls=%p)",
+              backend->target_host, backend->target_port,
+              (int)*pfd, (void*)*ptls);
+    return true;
+}
+
+void proxy_pool_release(cocoon_proxy_backend_t *backend, cocoon_socket_t fd, proxy_tls_conn_t *tls_conn) {
+    if (!backend) return;
+
+    bool use_https = backend->target_https;
+    time_t now = time(NULL);
+
+    pthread_mutex_lock(&backend->pool.mutex);
+
+    /* 先尝试找到这个连接的槽位（如果它原本就在池中） */
+    for (size_t i = 0; i < COCOON_MAX_POOL_SIZE; i++) {
+        cocoon_pooled_conn_t *pc = &backend->pool.conns[i];
+        if (pc->in_use &&
+            ((use_https && pc->tls_conn == tls_conn) ||
+             (!use_https && pc->fd == fd))) {
+            pc->in_use = false;
+            pc->last_used = now;
+            pthread_mutex_unlock(&backend->pool.mutex);
+            log_debug("连接池归还(原位): %s:%d", backend->target_host, backend->target_port);
+            return;
+        }
+    }
+
+    /* 如果是新建连接，找一个空槽位放入 */
+    for (size_t i = 0; i < COCOON_MAX_POOL_SIZE; i++) {
+        cocoon_pooled_conn_t *pc = &backend->pool.conns[i];
+        if (pc->fd == COCOON_INVALID_SOCKET && !pc->tls_conn) {
+            pc->fd = fd;
+            pc->tls_conn = tls_conn;
+            pc->in_use = false;
+            pc->last_used = now;
+            pthread_mutex_unlock(&backend->pool.mutex);
+            log_debug("连接池归还(新槽): %s:%d", backend->target_host, backend->target_port);
+            return;
+        }
+    }
+
+    pthread_mutex_unlock(&backend->pool.mutex);
+
+    /* 池满，直接关闭 */
+    log_debug("连接池满，关闭连接: %s:%d", backend->target_host, backend->target_port);
+    if (use_https && tls_conn) {
+        proxy_tls_close(tls_conn);
+    } else if (fd != COCOON_INVALID_SOCKET) {
+        cocoon_socket_close(fd);
+    }
 }
 
 static void parse_backend_url(const char *target_url, cocoon_proxy_backend_t *backend) {
@@ -87,6 +235,9 @@ static void parse_backend_url(const char *target_url, cocoon_proxy_backend_t *ba
     if (backend->target_port == 0) {
         backend->target_port = https ? 443 : 80;
     }
+    
+    /* 初始化连接池 */
+    proxy_pool_init(backend);
 }
 
 bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *target_url) {
@@ -298,8 +449,8 @@ static int proxy_send_all_tls(proxy_tls_conn_t *conn, const char *data, size_t l
 /**
  * proxy_relay_backend - 尝试连接并转发请求到单个后端
  *
- * 建立连接、发送请求、转发响应回客户端。
- * 调用者负责不传入已关闭或无效的 fd。
+ * 从连接池获取连接（或新建），发送请求，转发响应回客户端。
+ * 请求完成后将连接归还到池中（如果成功）。
  *
  * @return true 成功，false 失败（连接、发送或转发响应出错）
  */
@@ -311,18 +462,10 @@ static bool proxy_relay_backend(cocoon_socket_t client_fd, const http_request_t 
     proxy_tls_conn_t *tls_conn = NULL;
     bool use_https = backend->target_https;
 
-    if (use_https) {
-        tls_conn = proxy_tls_connect(backend->target_host, backend->target_port);
-        if (!tls_conn) {
-            log_warn("后端 %s:%d 连接失败", backend->target_host, backend->target_port);
-            return false;
-        }
-    } else {
-        backend_fd = proxy_connect_backend(backend);
-        if (backend_fd == COCOON_INVALID_SOCKET) {
-            log_warn("后端 %s:%d 连接失败", backend->target_host, backend->target_port);
-            return false;
-        }
+    /* 从连接池获取连接（优先复用） */
+    if (!proxy_pool_acquire(backend, &backend_fd, &tls_conn)) {
+        log_warn("后端 %s:%d 连接失败（连接池）", backend->target_host, backend->target_port);
+        return false;
     }
 
     /* 构建转发路径 */
@@ -340,7 +483,7 @@ static bool proxy_relay_backend(cocoon_socket_t client_fd, const http_request_t 
         "Host: %s:%d\r\n"
         "X-Forwarded-For: %s\r\n"
         "X-Forwarded-Proto: %s\r\n"
-        "Connection: close\r\n",
+        "Connection: keep-alive\r\n",
         http_method_str(req->method),
         forwarded_path,
         backend->target_host,
@@ -407,7 +550,11 @@ static bool proxy_relay_backend(cocoon_socket_t client_fd, const http_request_t 
                 recv_ok = false;
                 break;
             }
-            if (r == 0) break;
+            if (r == 0) {
+                /* 后端关闭连接，如果尚未转发任何数据则视为失败 */
+                if (total == 0) recv_ok = false;
+                break;
+            }
 
             if (send_all_fd(client_fd, relay_buf, (size_t)r) != 0) {
                 log_error("转发响应到客户端失败");
@@ -427,11 +574,15 @@ static bool proxy_relay_backend(cocoon_socket_t client_fd, const http_request_t 
 
     if (total_forwarded) *total_forwarded = total;
 
-    /* 清理后端连接 */
-    if (use_https) {
-        proxy_tls_close(tls_conn);
+    /* 归还或关闭连接：只有后端未关闭时才归还 */
+    if (success && total > 0) {
+        proxy_pool_release(backend, backend_fd, tls_conn);
     } else {
-        cocoon_socket_close(backend_fd);
+        if (use_https && tls_conn) {
+            proxy_tls_close(tls_conn);
+        } else if (backend_fd != COCOON_INVALID_SOCKET) {
+            cocoon_socket_close(backend_fd);
+        }
     }
 
     return success;
@@ -479,3 +630,14 @@ bool proxy_forward(cocoon_socket_t client_fd, const http_request_t *req,
     log_error("所有后端均不可用: %s", rule->path_prefix);
     return false;
 }
+
+void proxy_config_destroy(cocoon_proxy_config_t *cfg) {
+    if (!cfg) return;
+    for (size_t i = 0; i < cfg->count; i++) {
+        cocoon_proxy_rule_t *rule = &cfg->rules[i];
+        for (size_t j = 0; j < rule->backend_count; j++) {
+            proxy_pool_destroy(&rule->backends[j]);
+        }
+    }
+}
+

@@ -1350,6 +1350,9 @@ void server_stop(server_context_t *ctx) {
 void server_destroy(server_context_t *ctx) {
     if (!ctx) return;
 
+    /* 关闭反向代理连接池 */
+    proxy_config_destroy(&ctx->proxy_config);
+
     /* 卸载插件 */
     cocoon_plugin_unload_all();
 

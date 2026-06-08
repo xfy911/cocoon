@@ -1012,8 +1012,59 @@ else
     fail
 fi
 
-# 清理后端服务器
+# 清理 HTTP 后端服务器
 kill -9 $BACKEND_PID 2>/dev/null || true
+kill_server
+sleep 1
+
+# === HTTPS 反向代理测试 ===
+echo ""
+echo "=== HTTPS 反向代理测试 ==="
+
+# 启动 HTTPS 后端服务器
+python3 "$ROOT/../https_backend.py" 9001 "$ROOT/../server.crt" "$ROOT/../server.key" "$ROOT" > "$TMPDIR/backend_https.log" 2>&1 &
+BACKEND_HTTPS_PID=$!
+sleep 1
+
+# 创建带 HTTPS 代理配置的配置文件
+HTTPS_PROXY_CONFIG="$TMPDIR/https_proxy_config.json"
+cat > "$HTTPS_PROXY_CONFIG" << 'EOF'
+{
+    "root_dir": "./tests/fixtures",
+    "port": 9999,
+    "log_level": "debug",
+    "proxies": [
+        {"prefix": "/backend", "target": "https://localhost:9001"}
+    ]
+}
+EOF
+
+$SERVER -c "$HTTPS_PROXY_CONFIG" > "$TMPDIR/server_https_proxy.log" 2>&1 &
+for i in {1..30}; do
+    if nc -z localhost 9999 2>/dev/null; then break; fi
+    sleep 0.1
+done
+
+https_proxy_status=$(curl -s -o /dev/null -w "%{http_code}" "http://$HOST/backend/index.html")
+if [[ "$https_proxy_status" == "200" ]]; then
+    echo "  ✓ HTTPS 反向代理 GET — HTTP 200"
+    pass
+else
+    echo "  ✗ HTTPS 反向代理 GET — 期望 200, 实际 $https_proxy_status"
+    fail
+fi
+
+https_proxy_body=$(curl -s "http://$HOST/backend/index.html")
+if echo "$https_proxy_body" | grep -q "Cocoon"; then
+    echo "  ✓ HTTPS 反向代理响应体 — 包含后端内容"
+    pass
+else
+    echo "  ✗ HTTPS 反向代理响应体 — 未包含后端内容"
+    fail
+fi
+
+# 清理 HTTPS 后端服务器
+kill -9 $BACKEND_HTTPS_PID 2>/dev/null || true
 
 # 恢复默认服务器
 kill_server

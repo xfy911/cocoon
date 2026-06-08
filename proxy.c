@@ -7,6 +7,7 @@
  */
 
 #include "proxy.h"
+#include "proxy_tls.h"
 #include "log.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -204,18 +205,43 @@ static int send_all_fd(cocoon_socket_t fd, const char *data, size_t len) {
     return 0;
 }
 
+/**
+ * proxy_send_all_tls - 通过 TLS 连接发送全部数据
+ */
+static int proxy_send_all_tls(proxy_tls_conn_t *conn, const char *data, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = proxy_tls_write(conn, data + sent, len - sent);
+        if (n > 0) {
+            sent += (size_t)n;
+        } else if (n < 0) {
+            if (errno == EAGAIN || errno == EINTR) continue;
+            return -1;
+        } else {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 bool proxy_forward(cocoon_socket_t client_fd, const http_request_t *req,
                    const cocoon_proxy_rule_t *rule,
                    const struct sockaddr_storage *client_addr) {
-    /* 目前不支持 HTTPS 后端 */
-    if (rule->target_https) {
-        log_warn("HTTPS 后端暂未支持，拒绝代理: %s", rule->target_host);
-        return false;
-    }
+    bool use_https = rule->target_https;
+    cocoon_socket_t backend_fd = COCOON_INVALID_SOCKET;
+    proxy_tls_conn_t *tls_conn = NULL;
 
-    cocoon_socket_t backend_fd = proxy_connect_backend(rule);
-    if (backend_fd == COCOON_INVALID_SOCKET) {
-        return false;
+    if (use_https) {
+        tls_conn = proxy_tls_connect(rule->target_host, rule->target_port);
+        if (!tls_conn) {
+            log_error("连接 HTTPS 后端失败: %s:%d", rule->target_host, rule->target_port);
+            return false;
+        }
+    } else {
+        backend_fd = proxy_connect_backend(rule);
+        if (backend_fd == COCOON_INVALID_SOCKET) {
+            return false;
+        }
     }
 
     /* 构建转发路径 */
@@ -232,13 +258,14 @@ bool proxy_forward(cocoon_socket_t client_fd, const http_request_t *req,
         "%s %s HTTP/1.1\r\n"
         "Host: %s:%d\r\n"
         "X-Forwarded-For: %s\r\n"
-        "X-Forwarded-Proto: http\r\n"
+        "X-Forwarded-Proto: %s\r\n"
         "Connection: close\r\n",
         http_method_str(req->method),
         forwarded_path,
         rule->target_host,
         rule->target_port,
-        xff);
+        xff,
+        use_https ? "https" : "http");
 
     /* 透传常见请求头 */
     if (req->content_type[0] != '\0') {
@@ -253,18 +280,34 @@ bool proxy_forward(cocoon_socket_t client_fd, const http_request_t *req,
     n += snprintf(request_buf + n, sizeof(request_buf) - n, "\r\n");
 
     /* 发送请求头 */
-    if (send_all_fd(backend_fd, request_buf, (size_t)n) != 0) {
-        log_error("转发请求头到后端失败");
-        cocoon_socket_close(backend_fd);
-        return false;
+    if (use_https) {
+        if (proxy_send_all_tls(tls_conn, request_buf, (size_t)n) != 0) {
+            log_error("转发请求头到 HTTPS 后端失败");
+            proxy_tls_close(tls_conn);
+            return false;
+        }
+    } else {
+        if (send_all_fd(backend_fd, request_buf, (size_t)n) != 0) {
+            log_error("转发请求头到后端失败");
+            cocoon_socket_close(backend_fd);
+            return false;
+        }
     }
 
     /* 转发请求体 */
     if (req->body && req->body_len > 0) {
-        if (send_all_fd(backend_fd, req->body, req->body_len) != 0) {
-            log_error("转发请求体到后端失败");
-            cocoon_socket_close(backend_fd);
-            return false;
+        if (use_https) {
+            if (proxy_send_all_tls(tls_conn, req->body, req->body_len) != 0) {
+                log_error("转发请求体到 HTTPS 后端失败");
+                proxy_tls_close(tls_conn);
+                return false;
+            }
+        } else {
+            if (send_all_fd(backend_fd, req->body, req->body_len) != 0) {
+                log_error("转发请求体到后端失败");
+                cocoon_socket_close(backend_fd);
+                return false;
+            }
         }
     }
 
@@ -272,7 +315,12 @@ bool proxy_forward(cocoon_socket_t client_fd, const http_request_t *req,
     char relay_buf[8192];
     ssize_t total_forwarded = 0;
     while (1) {
-        ssize_t r = recv(backend_fd, relay_buf, sizeof(relay_buf), 0);
+        ssize_t r;
+        if (use_https) {
+            r = proxy_tls_read(tls_conn, relay_buf, sizeof(relay_buf));
+        } else {
+            r = recv(backend_fd, relay_buf, sizeof(relay_buf), 0);
+        }
         if (r < 0) {
             if (errno == EAGAIN || errno == EINTR) continue;
             break;
@@ -290,6 +338,10 @@ bool proxy_forward(cocoon_socket_t client_fd, const http_request_t *req,
               req->path, rule->target_host, rule->target_port,
               forwarded_path, total_forwarded);
 
-    cocoon_socket_close(backend_fd);
+    if (use_https) {
+        proxy_tls_close(tls_conn);
+    } else {
+        cocoon_socket_close(backend_fd);
+    }
     return req->keep_alive;
 }

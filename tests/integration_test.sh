@@ -1017,6 +1017,81 @@ kill -9 $BACKEND_PID 2>/dev/null || true
 kill_server
 sleep 1
 
+# === 加权轮询反向代理测试 ===
+echo ""
+echo "=== 加权轮询反向代理测试 ==="
+
+# 创建两个后端目录，放不同内容
+mkdir -p "$TMPDIR/backend_a" "$TMPDIR/backend_b"
+echo "Backend-A" > "$TMPDIR/backend_a/index.html"
+echo "Backend-B" > "$TMPDIR/backend_b/index.html"
+
+# 启动两个后端服务器
+python3 -m http.server 9002 --directory "$TMPDIR/backend_a" > "$TMPDIR/backend_a.log" 2>&1 &
+BACKEND_A_PID=$!
+python3 -m http.server 9003 --directory "$TMPDIR/backend_b" > "$TMPDIR/backend_b.log" 2>&1 &
+BACKEND_B_PID=$!
+sleep 1
+
+# 创建加权轮询配置（权重 3:1）
+WEIGHTED_CONFIG="$TMPDIR/weighted_proxy_config.json"
+cat > "$WEIGHTED_CONFIG" << EOF
+{
+    "root_dir": "./tests/fixtures",
+    "port": 9999,
+    "log_level": "debug",
+    "proxies": [
+        {"prefix": "/backend", "target": "http://localhost:9002", "weight": 3, "pool_size": 2},
+        {"prefix": "/backend", "target": "http://localhost:9003", "weight": 1, "pool_size": 2}
+    ]
+}
+EOF
+
+$SERVER -c "$WEIGHTED_CONFIG" > "$TMPDIR/server_weighted.log" 2>&1 &
+for i in {1..30}; do
+    if nc -z localhost 9999 2>/dev/null; then break; fi
+    sleep 0.1
+done
+
+# 发送4个请求，验证加权轮询工作（至少能收到响应）
+weighted_status=$(curl -s -o /dev/null -w "%{http_code}" "http://$HOST/backend/index.html")
+if [[ "$weighted_status" == "200" ]]; then
+    echo "  ✓ 加权轮询代理 — HTTP 200"
+    pass
+else
+    echo "  ✗ 加权轮询代理 — 期望 200, 实际 $weighted_status"
+    fail
+fi
+
+# 检查日志中是否记录了两个后端及其权重
+if grep -q "weight=3" "$TMPDIR/server_weighted.log" && grep -q "weight=1" "$TMPDIR/server_weighted.log"; then
+    echo "  ✓ 加权轮询配置 — 权重 3:1 已加载"
+    pass
+else
+    echo "  ✗ 加权轮询配置 — 未找到权重日志"
+    fail
+fi
+
+# 发送多个请求，验证平滑轮询分布（至少两个后端都收到请求）
+for i in {1..4}; do
+    curl -s -o /dev/null "http://$HOST/backend/index.html"
+done
+
+# 检查两个后端日志中都有请求
+if grep -q "GET /index.html" "$TMPDIR/backend_a.log" && grep -q "GET /index.html" "$TMPDIR/backend_b.log"; then
+    echo "  ✓ 加权轮询分布 — 两个后端均收到请求"
+    pass
+else
+    echo "  ✗ 加权轮询分布 — 后端请求分布异常"
+    fail
+fi
+
+# 清理加权轮询后端服务器
+kill -9 $BACKEND_A_PID 2>/dev/null || true
+kill -9 $BACKEND_B_PID 2>/dev/null || true
+kill_server
+sleep 1
+
 # === HTTPS 反向代理测试 ===
 echo ""
 echo "=== HTTPS 反向代理测试 ==="

@@ -11,8 +11,8 @@
     "plugins": ["plugins/hello.so"],
     "access_log": "-",
     "proxies": [
-        {"prefix": "/api", "target": "http://localhost:3000", "pool_size": 8},
-        {"prefix": "/api", "target": "http://localhost:3001"},
-        {"prefix": "/backend", "target": "https://localhost:8443", "pool_size": 4}
+        {"prefix": "/api", "target": "http://localhost:3000", "pool_size": 8, "weight": 3},
+        {"prefix": "/api", "target": "http://localhost:3001", "weight": 1},
+        {"prefix": "/backend", "target": "https://localhost:8443", "pool_size": 4, "weight": 1}
     ]
 }

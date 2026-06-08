@@ -25,11 +25,13 @@ void proxy_init(cocoon_proxy_config_t *cfg) {
     cfg->count = 0;
 }
 
-static void backend_init_health(cocoon_proxy_backend_t *backend) {
+static void backend_init(cocoon_proxy_backend_t *backend, uint32_t weight) {
     backend->healthy = true;
     backend->fail_count = 0;
     backend->success_count = 0;
     backend->last_check = 0;
+    backend->weight = weight > 0 ? weight : 1;
+    backend->current_weight = 0;
 }
 
 void proxy_pool_init(cocoon_proxy_backend_t *backend, size_t max_pool_size) {
@@ -247,7 +249,7 @@ static void parse_backend_url(const char *target_url, cocoon_proxy_backend_t *ba
     proxy_pool_init(backend, pool_size);
 }
 
-bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *target_url, size_t pool_size) {
+bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *target_url, size_t pool_size, uint32_t weight) {
     if (!prefix || !target_url || prefix[0] == '\0' || target_url[0] == '\0') {
         return false;
     }
@@ -269,13 +271,14 @@ bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *
         }
         cocoon_proxy_backend_t *backend = &rule->backends[rule->backend_count];
         parse_backend_url(target_url, backend, pool_size);
-        backend_init_health(backend);
-        log_info("追加后端: %s -> %s://%s:%d%s",
+        backend_init(backend, weight);
+        log_info("追加后端: %s -> %s://%s:%d%s (weight=%u)",
                  rule->path_prefix,
                  backend->target_https ? "https" : "http",
                  backend->target_host,
                  backend->target_port,
-                 backend->target_path);
+                 backend->target_path,
+                 backend->weight);
         rule->backend_count++;
         return true;
     }
@@ -294,15 +297,16 @@ bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *
 
     cocoon_proxy_backend_t *backend = &rule->backends[rule->backend_count];
     parse_backend_url(target_url, backend, pool_size);
-    backend_init_health(backend);
+    backend_init(backend, weight);
     rule->backend_count++;
 
-    log_info("添加代理规则: %s -> %s://%s:%d%s",
+    log_info("添加代理规则: %s -> %s://%s:%d%s (weight=%u)",
              rule->path_prefix,
              backend->target_https ? "https" : "http",
              backend->target_host,
              backend->target_port,
-             backend->target_path);
+             backend->target_path,
+             backend->weight);
 
     cfg->count++;
     return true;
@@ -595,6 +599,73 @@ static bool proxy_relay_backend(cocoon_socket_t client_fd, const http_request_t 
     return success;
 }
 
+/**
+ * select_backend_sww - 平滑加权轮询选择后端
+ *
+ * Nginx 同款平滑加权轮询算法：
+ * 1. 所有健康后端 current_weight += weight
+ * 2. 选择 current_weight 最大的
+ * 3. 选中后端 current_weight -= total_weight
+ * 4. 返回选中后端
+ *
+ * 这样能保证权重比例严格满足，且分布更均匀。
+ *
+ * @param rule 代理规则
+ * @return 选中的后端，无健康后端返回 NULL
+ */
+static cocoon_proxy_backend_t *select_backend_sww(cocoon_proxy_rule_t *rule) {
+    if (!rule || rule->backend_count == 0) return NULL;
+
+    cocoon_proxy_backend_t *best = NULL;
+    int32_t total_weight = 0;
+
+    for (size_t i = 0; i < rule->backend_count; i++) {
+        cocoon_proxy_backend_t *b = &rule->backends[i];
+        if (!b->healthy) continue;
+
+        b->current_weight += (int32_t)b->weight;
+        total_weight += (int32_t)b->weight;
+
+        if (!best || b->current_weight > best->current_weight) {
+            best = b;
+        }
+    }
+
+    if (best) {
+        best->current_weight -= total_weight;
+    }
+
+    return best;
+}
+
+/**
+ * select_backend_sww_all - 平滑加权轮询（包含不健康后端）
+ *
+ * 用于 fallback 场景：所有后端都标记为不健康时，仍然尝试请求。
+ */
+static cocoon_proxy_backend_t *select_backend_sww_all(cocoon_proxy_rule_t *rule) {
+    if (!rule || rule->backend_count == 0) return NULL;
+
+    cocoon_proxy_backend_t *best = NULL;
+    int32_t total_weight = 0;
+
+    for (size_t i = 0; i < rule->backend_count; i++) {
+        cocoon_proxy_backend_t *b = &rule->backends[i];
+        b->current_weight += (int32_t)b->weight;
+        total_weight += (int32_t)b->weight;
+
+        if (!best || b->current_weight > best->current_weight) {
+            best = b;
+        }
+    }
+
+    if (best) {
+        best->current_weight -= total_weight;
+    }
+
+    return best;
+}
+
 bool proxy_forward(cocoon_socket_t client_fd, const http_request_t *req,
                    cocoon_proxy_rule_t *rule,
                    const struct sockaddr_storage *client_addr) {
@@ -603,32 +674,36 @@ bool proxy_forward(cocoon_socket_t client_fd, const http_request_t *req,
         return false;
     }
 
-    size_t start_idx = rule->current_index;
+    /* 第一轮：优先尝试 healthy 后端（平滑加权轮询） */
+    cocoon_proxy_backend_t *backend = select_backend_sww(rule);
+    if (backend) {
+        ssize_t total = 0;
+        if (proxy_relay_backend(client_fd, req, rule, backend, client_addr, &total)) {
+            proxy_update_health(backend, true);
+            return req->keep_alive;
+        }
+        proxy_update_health(backend, false);
+    }
 
-    /* 第一轮：优先尝试 healthy 后端 */
+    /* 如果唯一选中的后端失败了，尝试其他 healthy 后端 */
     for (size_t t = 0; t < rule->backend_count; t++) {
-        size_t idx = (start_idx + t) % rule->backend_count;
-        cocoon_proxy_backend_t *backend = &rule->backends[idx];
-        if (!backend->healthy) continue;
+        backend = select_backend_sww(rule);
+        if (!backend) break;
 
         ssize_t total = 0;
         if (proxy_relay_backend(client_fd, req, rule, backend, client_addr, &total)) {
             proxy_update_health(backend, true);
-            rule->current_index = (idx + 1) % rule->backend_count;
             return req->keep_alive;
         }
         proxy_update_health(backend, false);
     }
 
     /* 第二轮：fallback 到所有后端（包括 unhealthy） */
-    for (size_t t = 0; t < rule->backend_count; t++) {
-        size_t idx = (start_idx + t) % rule->backend_count;
-        cocoon_proxy_backend_t *backend = &rule->backends[idx];
-
+    backend = select_backend_sww_all(rule);
+    if (backend) {
         ssize_t total = 0;
         if (proxy_relay_backend(client_fd, req, rule, backend, client_addr, &total)) {
             proxy_update_health(backend, true);
-            rule->current_index = (idx + 1) % rule->backend_count;
             return req->keep_alive;
         }
         proxy_update_health(backend, false);

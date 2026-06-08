@@ -1265,7 +1265,7 @@ server_context_t *server_create(const cocoon_config_t *config) {
     /* 初始化反向代理配置 */
     proxy_init(&ctx->proxy_config);
     for (size_t i = 0; i < ctx->config.num_proxies; i++) {
-        proxy_add_rule(&ctx->proxy_config, ctx->config.proxies[i].prefix, ctx->config.proxies[i].target, ctx->config.proxies[i].pool_size);
+        proxy_add_rule(&ctx->proxy_config, ctx->config.proxies[i].prefix, ctx->config.proxies[i].target, ctx->config.proxies[i].pool_size, ctx->config.proxies[i].weight);
     }
 
     /* 加载插件 */

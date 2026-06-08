@@ -439,6 +439,9 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
                             } else if (strcmp(pk, "pool_size") == 0 && pval.type == TOKEN_NUMBER) {
                                 char *v = token_str_dup(&pval);
                                 if (v) { config->proxies[config->num_proxies].pool_size = (uint32_t)atoi(v); free(v); }
+                            } else if (strcmp(pk, "weight") == 0 && pval.type == TOKEN_NUMBER) {
+                                char *v = token_str_dup(&pval);
+                                if (v) { config->proxies[config->num_proxies].weight = (uint32_t)atoi(v); free(v); }
                             }
                             free(pk);
                             token_t psep = parser_next_token(&p);

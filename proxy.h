@@ -14,14 +14,26 @@
 #include "platform.h"
 #include <stdbool.h>
 
-#define COCOON_MAX_PROXY_RULES 8
+#define COCOON_MAX_PROXY_BACKENDS 8
 
+/**
+ * cocoon_proxy_backend_t - 单个后端服务器配置
+ */
 typedef struct {
-    char path_prefix[256];
     char target_host[256];
     char target_path[256];
     uint16_t target_port;
     bool target_https;
+} cocoon_proxy_backend_t;
+
+/**
+ * cocoon_proxy_rule_t - 代理规则（支持多后端）
+ */
+typedef struct {
+    char path_prefix[256];
+    cocoon_proxy_backend_t backends[COCOON_MAX_PROXY_BACKENDS];
+    size_t backend_count;
+    size_t current_index;  /* 轮询索引 */
 } cocoon_proxy_rule_t;
 
 typedef struct {
@@ -35,7 +47,10 @@ typedef struct {
 void proxy_init(cocoon_proxy_config_t *cfg);
 
 /**
- * proxy_add_rule - 添加代理规则
+ * proxy_add_rule - 添加代理规则或向后端追加
+ *
+ * 如果 prefix 已存在，将 target 追加为同一规则的新后端。
+ * 如果 prefix 不存在，创建新规则。
  *
  * @param cfg 代理配置
  * @param prefix 路径前缀（如 "/api/"）
@@ -51,11 +66,12 @@ bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *
  * @param path 请求路径
  * @return 匹配的规则，未匹配返回 NULL
  */
-const cocoon_proxy_rule_t *proxy_match(const cocoon_proxy_config_t *cfg, const char *path);
+cocoon_proxy_rule_t *proxy_match(cocoon_proxy_config_t *cfg, const char *path);
 
 /**
- * proxy_forward - 将请求转发到目标后端
+ * proxy_forward - 将请求转发到目标后端（轮询+failover）
  *
+ * 使用轮询算法选择后端，当前后端失败时自动尝试下一个。
  * 建立到后端的连接，转发请求，将响应回写给客户端。
  *
  * @param client_fd 客户端 socket
@@ -65,7 +81,7 @@ const cocoon_proxy_rule_t *proxy_match(const cocoon_proxy_config_t *cfg, const c
  * @return true 保持连接，false 关闭
  */
 bool proxy_forward(cocoon_socket_t client_fd, const http_request_t *req,
-                   const cocoon_proxy_rule_t *rule,
+                   cocoon_proxy_rule_t *rule,
                    const struct sockaddr_storage *client_addr);
 
 #endif /* COCOON_PROXY_H */

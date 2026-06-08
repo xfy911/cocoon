@@ -408,7 +408,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
 
     /* 反向代理检查 */
     if (conn->ctx && conn->ctx->proxy_config.count > 0) {
-        const cocoon_proxy_rule_t *rule = proxy_match(&conn->ctx->proxy_config, req.path);
+        cocoon_proxy_rule_t *rule = proxy_match(&conn->ctx->proxy_config, req.path);
         if (rule) {
             bool keep = proxy_forward(conn->fd, &req, rule, &conn->client_addr);
             conn->response_status = 200; /* 代理响应状态由后端决定，这里记录一个通用值 */

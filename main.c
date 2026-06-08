@@ -290,6 +290,7 @@ int main(int argc, char *argv[]) {
     /* 注册信号处理 */
     cocoon_signal_setup(signal_handler);
     signal(SIGUSR1, reload_handler);
+    signal(SIGPIPE, SIG_IGN);  /* 忽略 SIGPIPE，防止写入已关闭的连接时进程终止 */
 
     /* 设置日志级别 */
     log_set_level(config.log_level);

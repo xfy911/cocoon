@@ -15,6 +15,8 @@
 #include <stdbool.h>
 
 #define COCOON_MAX_PROXY_BACKENDS 8
+#define COCOON_HEALTHY_THRESHOLD 2  /* 连续成功次数恢复健康 */
+#define COCOON_UNHEALTHY_THRESHOLD 3  /* 连续失败次数标记不健康 */
 
 /**
  * cocoon_proxy_backend_t - 单个后端服务器配置
@@ -24,6 +26,11 @@ typedef struct {
     char target_path[256];
     uint16_t target_port;
     bool target_https;
+    /* 健康状态 */
+    bool healthy;           /* 当前是否健康 */
+    int fail_count;         /* 连续失败次数 */
+    int success_count;      /* 连续成功次数 */
+    time_t last_check;      /* 上次检测时间 */
 } cocoon_proxy_backend_t;
 
 /**

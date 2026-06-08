@@ -17,10 +17,18 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <time.h>
 
 void proxy_init(cocoon_proxy_config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
     cfg->count = 0;
+}
+
+static void backend_init_health(cocoon_proxy_backend_t *backend) {
+    backend->healthy = true;
+    backend->fail_count = 0;
+    backend->success_count = 0;
+    backend->last_check = 0;
 }
 
 static void parse_backend_url(const char *target_url, cocoon_proxy_backend_t *backend) {
@@ -103,6 +111,7 @@ bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *
         }
         cocoon_proxy_backend_t *backend = &rule->backends[rule->backend_count];
         parse_backend_url(target_url, backend);
+        backend_init_health(backend);
         log_info("追加后端: %s -> %s://%s:%d%s",
                  rule->path_prefix,
                  backend->target_https ? "https" : "http",
@@ -127,6 +136,7 @@ bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *
 
     cocoon_proxy_backend_t *backend = &rule->backends[rule->backend_count];
     parse_backend_url(target_url, backend);
+    backend_init_health(backend);
     rule->backend_count++;
 
     log_info("添加代理规则: %s -> %s://%s:%d%s",
@@ -156,6 +166,27 @@ cocoon_proxy_rule_t *proxy_match(cocoon_proxy_config_t *cfg, const char *path) {
 /**
  * proxy_connect_backend - 连接到指定后端
  */
+static void proxy_update_health(cocoon_proxy_backend_t *backend, bool success) {
+    time_t now = time(NULL);
+    backend->last_check = now;
+
+    if (success) {
+        backend->fail_count = 0;
+        backend->success_count++;
+        if (!backend->healthy && backend->success_count >= COCOON_HEALTHY_THRESHOLD) {
+            backend->healthy = true;
+            log_info("后端恢复健康: %s:%d", backend->target_host, backend->target_port);
+        }
+    } else {
+        backend->success_count = 0;
+        backend->fail_count++;
+        if (backend->healthy && backend->fail_count >= COCOON_UNHEALTHY_THRESHOLD) {
+            backend->healthy = false;
+            log_warn("后端标记不健康: %s:%d (连续失败 %d 次)",
+                     backend->target_host, backend->target_port, backend->fail_count);
+        }
+    }
+}
 static cocoon_socket_t proxy_connect_backend(const cocoon_proxy_backend_t *backend) {
     struct hostent *host = gethostbyname(backend->target_host);
     if (!host) {
@@ -264,6 +295,148 @@ static int proxy_send_all_tls(proxy_tls_conn_t *conn, const char *data, size_t l
     return 0;
 }
 
+/**
+ * proxy_relay_backend - 尝试连接并转发请求到单个后端
+ *
+ * 建立连接、发送请求、转发响应回客户端。
+ * 调用者负责不传入已关闭或无效的 fd。
+ *
+ * @return true 成功，false 失败（连接、发送或转发响应出错）
+ */
+static bool proxy_relay_backend(cocoon_socket_t client_fd, const http_request_t *req,
+                                  cocoon_proxy_rule_t *rule, cocoon_proxy_backend_t *backend,
+                                  const struct sockaddr_storage *client_addr,
+                                  ssize_t *total_forwarded) {
+    cocoon_socket_t backend_fd = COCOON_INVALID_SOCKET;
+    proxy_tls_conn_t *tls_conn = NULL;
+    bool use_https = backend->target_https;
+
+    if (use_https) {
+        tls_conn = proxy_tls_connect(backend->target_host, backend->target_port);
+        if (!tls_conn) {
+            log_warn("后端 %s:%d 连接失败", backend->target_host, backend->target_port);
+            return false;
+        }
+    } else {
+        backend_fd = proxy_connect_backend(backend);
+        if (backend_fd == COCOON_INVALID_SOCKET) {
+            log_warn("后端 %s:%d 连接失败", backend->target_host, backend->target_port);
+            return false;
+        }
+    }
+
+    /* 构建转发路径 */
+    char forwarded_path[512];
+    proxy_build_forwarded_path(rule, backend, req->path, forwarded_path, sizeof(forwarded_path));
+
+    /* 构建 X-Forwarded-For */
+    char xff[64];
+    proxy_build_xff(client_addr, xff, sizeof(xff));
+
+    /* 构建转发请求 */
+    char request_buf[4096];
+    int n = snprintf(request_buf, sizeof(request_buf),
+        "%s %s HTTP/1.1\r\n"
+        "Host: %s:%d\r\n"
+        "X-Forwarded-For: %s\r\n"
+        "X-Forwarded-Proto: %s\r\n"
+        "Connection: close\r\n",
+        http_method_str(req->method),
+        forwarded_path,
+        backend->target_host,
+        backend->target_port,
+        xff,
+        use_https ? "https" : "http");
+
+    /* 透传常见请求头 */
+    if (req->content_type[0] != '\0') {
+        n += snprintf(request_buf + n, sizeof(request_buf) - n,
+            "Content-Type: %s\r\n", req->content_type);
+    }
+    if (req->content_length > 0) {
+        n += snprintf(request_buf + n, sizeof(request_buf) - n,
+            "Content-Length: %ld\r\n", (long)req->content_length);
+    }
+
+    n += snprintf(request_buf + n, sizeof(request_buf) - n, "\r\n");
+
+    /* 发送请求头 */
+    bool send_ok = true;
+    if (use_https) {
+        if (proxy_send_all_tls(tls_conn, request_buf, (size_t)n) != 0) {
+            log_warn("转发请求头到 HTTPS 后端失败: %s:%d", backend->target_host, backend->target_port);
+            send_ok = false;
+        }
+    } else {
+        if (send_all_fd(backend_fd, request_buf, (size_t)n) != 0) {
+            log_warn("转发请求头到后端失败: %s:%d", backend->target_host, backend->target_port);
+            send_ok = false;
+        }
+    }
+
+    /* 发送请求体 */
+    if (send_ok && req->body && req->body_len > 0) {
+        if (use_https) {
+            if (proxy_send_all_tls(tls_conn, req->body, req->body_len) != 0) {
+                log_warn("转发请求体到 HTTPS 后端失败");
+                send_ok = false;
+            }
+        } else {
+            if (send_all_fd(backend_fd, req->body, req->body_len) != 0) {
+                log_warn("转发请求体到后端失败");
+                send_ok = false;
+            }
+        }
+    }
+
+    /* 流式转发响应回客户端 */
+    bool success = false;
+    ssize_t total = 0;
+    if (send_ok) {
+        char relay_buf[8192];
+        bool recv_ok = true;
+        while (1) {
+            ssize_t r;
+            if (use_https) {
+                r = proxy_tls_read(tls_conn, relay_buf, sizeof(relay_buf));
+            } else {
+                r = recv(backend_fd, relay_buf, sizeof(relay_buf), 0);
+            }
+            if (r < 0) {
+                if (errno == EAGAIN || errno == EINTR) continue;
+                recv_ok = false;
+                break;
+            }
+            if (r == 0) break;
+
+            if (send_all_fd(client_fd, relay_buf, (size_t)r) != 0) {
+                log_error("转发响应到客户端失败");
+                recv_ok = false;
+                break;
+            }
+            total += r;
+        }
+
+        if (recv_ok) {
+            log_debug("代理完成: %s -> 后端 %s:%d%s, 转发 %zd bytes",
+                      req->path, backend->target_host, backend->target_port,
+                      forwarded_path, total);
+            success = true;
+        }
+    }
+
+    if (total_forwarded) *total_forwarded = total;
+
+    /* 清理后端连接 */
+    if (use_https) {
+        proxy_tls_close(tls_conn);
+    } else {
+        cocoon_socket_close(backend_fd);
+    }
+
+    return success;
+}
+
 bool proxy_forward(cocoon_socket_t client_fd, const http_request_t *req,
                    cocoon_proxy_rule_t *rule,
                    const struct sockaddr_storage *client_addr) {
@@ -272,148 +445,35 @@ bool proxy_forward(cocoon_socket_t client_fd, const http_request_t *req,
         return false;
     }
 
-    /* 轮询起始索引 */
     size_t start_idx = rule->current_index;
-    size_t tried = 0;
-    bool success = false;
 
-    while (tried < rule->backend_count) {
-        size_t idx = (start_idx + tried) % rule->backend_count;
+    /* 第一轮：优先尝试 healthy 后端 */
+    for (size_t t = 0; t < rule->backend_count; t++) {
+        size_t idx = (start_idx + t) % rule->backend_count;
         cocoon_proxy_backend_t *backend = &rule->backends[idx];
+        if (!backend->healthy) continue;
 
-        cocoon_socket_t backend_fd = COCOON_INVALID_SOCKET;
-        proxy_tls_conn_t *tls_conn = NULL;
-        bool use_https = backend->target_https;
-
-        if (use_https) {
-            tls_conn = proxy_tls_connect(backend->target_host, backend->target_port);
-            if (!tls_conn) {
-                log_warn("后端 %s:%d 连接失败，尝试下一个", backend->target_host, backend->target_port);
-                tried++;
-                continue;
-            }
-        } else {
-            backend_fd = proxy_connect_backend(backend);
-            if (backend_fd == COCOON_INVALID_SOCKET) {
-                log_warn("后端 %s:%d 连接失败，尝试下一个", backend->target_host, backend->target_port);
-                tried++;
-                continue;
-            }
-        }
-
-        /* 构建转发路径 */
-        char forwarded_path[512];
-        proxy_build_forwarded_path(rule, backend, req->path, forwarded_path, sizeof(forwarded_path));
-
-        /* 构建 X-Forwarded-For */
-        char xff[64];
-        proxy_build_xff(client_addr, xff, sizeof(xff));
-
-        /* 构建转发请求 */
-        char request_buf[4096];
-        int n = snprintf(request_buf, sizeof(request_buf),
-            "%s %s HTTP/1.1\r\n"
-            "Host: %s:%d\r\n"
-            "X-Forwarded-For: %s\r\n"
-            "X-Forwarded-Proto: %s\r\n"
-            "Connection: close\r\n",
-            http_method_str(req->method),
-            forwarded_path,
-            backend->target_host,
-            backend->target_port,
-            xff,
-            use_https ? "https" : "http");
-
-        /* 透传常见请求头 */
-        if (req->content_type[0] != '\0') {
-            n += snprintf(request_buf + n, sizeof(request_buf) - n,
-                "Content-Type: %s\r\n", req->content_type);
-        }
-        if (req->content_length > 0) {
-            n += snprintf(request_buf + n, sizeof(request_buf) - n,
-                "Content-Length: %ld\r\n", (long)req->content_length);
-        }
-
-        n += snprintf(request_buf + n, sizeof(request_buf) - n, "\r\n");
-
-        /* 发送请求头 */
-        bool send_ok = true;
-        if (use_https) {
-            if (proxy_send_all_tls(tls_conn, request_buf, (size_t)n) != 0) {
-                log_warn("转发请求头到 HTTPS 后端失败: %s:%d", backend->target_host, backend->target_port);
-                send_ok = false;
-            }
-        } else {
-            if (send_all_fd(backend_fd, request_buf, (size_t)n) != 0) {
-                log_warn("转发请求头到后端失败: %s:%d", backend->target_host, backend->target_port);
-                send_ok = false;
-            }
-        }
-
-        /* 发送请求体 */
-        if (send_ok && req->body && req->body_len > 0) {
-            if (use_https) {
-                if (proxy_send_all_tls(tls_conn, req->body, req->body_len) != 0) {
-                    log_warn("转发请求体到 HTTPS 后端失败");
-                    send_ok = false;
-                }
-            } else {
-                if (send_all_fd(backend_fd, req->body, req->body_len) != 0) {
-                    log_warn("转发请求体到后端失败");
-                    send_ok = false;
-                }
-            }
-        }
-
-        /* 流式转发响应回客户端 */
-        if (send_ok) {
-            char relay_buf[8192];
-            ssize_t total_forwarded = 0;
-            bool recv_ok = true;
-            while (1) {
-                ssize_t r;
-                if (use_https) {
-                    r = proxy_tls_read(tls_conn, relay_buf, sizeof(relay_buf));
-                } else {
-                    r = recv(backend_fd, relay_buf, sizeof(relay_buf), 0);
-                }
-                if (r < 0) {
-                    if (errno == EAGAIN || errno == EINTR) continue;
-                    recv_ok = false;
-                    break;
-                }
-                if (r == 0) break;
-
-                if (send_all_fd(client_fd, relay_buf, (size_t)r) != 0) {
-                    log_error("转发响应到客户端失败");
-                    recv_ok = false;
-                    break;
-                }
-                total_forwarded += r;
-            }
-
-            if (recv_ok) {
-                log_debug("代理完成: %s -> 后端[%zu] %s:%d%s, 转发 %zd bytes",
-                          req->path, idx, backend->target_host, backend->target_port,
-                          forwarded_path, total_forwarded);
-                success = true;
-            }
-        }
-
-        /* 清理后端连接 */
-        if (use_https) {
-            proxy_tls_close(tls_conn);
-        } else {
-            cocoon_socket_close(backend_fd);
-        }
-
-        if (success) {
-            /* 轮询指针前移 */
+        ssize_t total = 0;
+        if (proxy_relay_backend(client_fd, req, rule, backend, client_addr, &total)) {
+            proxy_update_health(backend, true);
             rule->current_index = (idx + 1) % rule->backend_count;
             return req->keep_alive;
         }
+        proxy_update_health(backend, false);
+    }
 
-        tried++;
+    /* 第二轮：fallback 到所有后端（包括 unhealthy） */
+    for (size_t t = 0; t < rule->backend_count; t++) {
+        size_t idx = (start_idx + t) % rule->backend_count;
+        cocoon_proxy_backend_t *backend = &rule->backends[idx];
+
+        ssize_t total = 0;
+        if (proxy_relay_backend(client_fd, req, rule, backend, client_addr, &total)) {
+            proxy_update_health(backend, true);
+            rule->current_index = (idx + 1) % rule->backend_count;
+            return req->keep_alive;
+        }
+        proxy_update_health(backend, false);
     }
 
     log_error("所有后端均不可用: %s", rule->path_prefix);

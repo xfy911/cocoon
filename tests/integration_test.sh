@@ -1072,6 +1072,85 @@ sleep 1
 start_server
 
 echo ""
+echo "=== Prometheus 指标测试 ==="
+
+# 先发起几个请求，让计数器有值
+curl -s -o /dev/null "$BASE/"
+curl -s -o /dev/null "$BASE/"
+curl -s -o /dev/null "$BASE/notfound.html"
+
+metrics_body=$(curl -s "$BASE/_metrics")
+metrics_status=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/_metrics")
+
+if [[ "$metrics_status" == "200" ]]; then
+    echo "  ✓ /_metrics 状态码 — HTTP 200"
+    pass
+else
+    echo "  ✗ /_metrics 状态码 — 期望 200, 实际 $metrics_status"
+    fail
+fi
+
+if echo "$metrics_body" | grep -q "cocoon_requests_total"; then
+    echo "  ✓ /_metrics 包含 requests_total 指标"
+    pass
+else
+    echo "  ✗ /_metrics 缺少 requests_total 指标"
+    fail
+fi
+
+if echo "$metrics_body" | grep -q "cocoon_response_2xx_total"; then
+    echo "  ✓ /_metrics 包含 response_2xx_total 指标"
+    pass
+else
+    echo "  ✗ /_metrics 缺少 response_2xx_total 指标"
+    fail
+fi
+
+if echo "$metrics_body" | grep -q "cocoon_response_4xx_total"; then
+    echo "  ✓ /_metrics 包含 response_4xx_total 指标"
+    pass
+else
+    echo "  ✗ /_metrics 缺少 response_4xx_total 指标"
+    fail
+fi
+
+if echo "$metrics_body" | grep -q "cocoon_uptime_seconds"; then
+    echo "  ✓ /_metrics 包含 uptime_seconds 指标"
+    pass
+else
+    echo "  ✗ /_metrics 缺少 uptime_seconds 指标"
+    fail
+fi
+
+if echo "$metrics_body" | grep -q "cocoon_connections_active"; then
+    echo "  ✓ /_metrics 包含 connections_active 指标"
+    pass
+else
+    echo "  ✗ /_metrics 缺少 connections_active 指标"
+    fail
+fi
+
+# 检查计数器是否实际在增长（至少 total >= 3，因为我们发了 3 个请求 + 1 个 metrics 请求）
+total_val=$(echo "$metrics_body" | grep "^cocoon_requests_total " | awk '{print $2}' || echo "0")
+if [[ "$total_val" -ge 3 ]]; then
+    echo "  ✓ requests_total 计数器正常递增 ($total_val)"
+    pass
+else
+    echo "  ✗ requests_total 计数器未递增 ($total_val)"
+    fail
+fi
+
+# 测试 HEAD 请求
+metrics_head_status=$(curl -s -o /dev/null -w "%{http_code}" -I "$BASE/_metrics")
+if [[ "$metrics_head_status" == "200" ]]; then
+    echo "  ✓ /_metrics HEAD 请求 — HTTP 200"
+    pass
+else
+    echo "  ✗ /_metrics HEAD 请求 — 期望 200, 实际 $metrics_head_status"
+    fail
+fi
+
+echo ""
 echo "=== 结果汇总 ==="
 echo "通过: $PASS"
 echo "失败: $FAIL"

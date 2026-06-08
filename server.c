@@ -80,6 +80,31 @@ static atomic_int g_active_connections = 0;
 static time_t g_server_start_time = 0;
 /* 最大连接数（供健康检查端点使用） */
 static uint32_t g_max_connections = 0;
+/* Prometheus 指标计数器 */
+static atomic_uint g_total_requests = 0;
+static atomic_uint g_response_2xx = 0;
+static atomic_uint g_response_3xx = 0;
+static atomic_uint g_response_4xx = 0;
+static atomic_uint g_response_5xx = 0;
+static atomic_uint g_response_200 = 0;
+static atomic_uint g_response_404 = 0;
+
+/**
+ * update_metrics - 更新 Prometheus 指标计数器
+ *
+ * 根据 HTTP 响应状态码更新分类计数器。
+ *
+ * @param status HTTP 响应状态码
+ */
+static void update_metrics(int status) {
+    atomic_fetch_add(&g_total_requests, 1);
+    if (status >= 200 && status < 300) atomic_fetch_add(&g_response_2xx, 1);
+    else if (status >= 300 && status < 400) atomic_fetch_add(&g_response_3xx, 1);
+    else if (status >= 400 && status < 500) atomic_fetch_add(&g_response_4xx, 1);
+    else if (status >= 500) atomic_fetch_add(&g_response_5xx, 1);
+    if (status == 200) atomic_fetch_add(&g_response_200, 1);
+    if (status == 404) atomic_fetch_add(&g_response_404, 1);
+}
 
 /**
  * set_nonblocking - 设置 socket 为非阻塞模式
@@ -362,6 +387,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         }
         /* 格式错误 */
         conn->response_status = 400;
+        update_metrics(conn->response_status);
         static_send_error(conn->fd, 400, false);
         access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
                          &req, conn->response_status, -1);
@@ -377,6 +403,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     /* 执行中间件链 */
     if (cocoon_middleware_run(&req, conn->fd) != 0) {
         /* 某个中间件已短路请求，清理并返回 */
+        if (conn->response_status > 0) update_metrics(conn->response_status);
         access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
                          &req, conn->response_status, -1);
         http_request_free(&req);
@@ -388,6 +415,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         size_t need = (size_t)req.content_length;
         if (conn_read_body(conn, &req, need) != 0) {
             conn->response_status = 413;
+            update_metrics(conn->response_status);
             static_send_error(conn->fd, 413, req.keep_alive); /* Payload Too Large */
             access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
                              &req, conn->response_status, -1);
@@ -400,6 +428,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     if (req.method == HTTP_POST) {
         bool keep = handle_post_request(conn->fd, &req, conn->root_dir);
         conn->response_status = 200; /* POST 目前总是返回 200 */
+        update_metrics(conn->response_status);
         access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
                          &req, conn->response_status, -1);
         http_request_free(&req);
@@ -412,6 +441,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         if (rule) {
             bool keep = proxy_forward(conn->fd, &req, rule, &conn->client_addr);
             conn->response_status = 200; /* 代理响应状态由后端决定，这里记录一个通用值 */
+            update_metrics(conn->response_status);
             access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
                              &req, conn->response_status, -1);
             http_request_free(&req);
@@ -422,6 +452,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     /* 只支持 GET 和 HEAD */
     if (req.method != HTTP_GET && req.method != HTTP_HEAD) {
         conn->response_status = 405;
+        update_metrics(conn->response_status);
         static_send_error(conn->fd, 405, req.keep_alive);
         access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
                          &req, conn->response_status, -1);
@@ -500,6 +531,76 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         send_all(conn->fd, body, (size_t)n);
 
         conn->response_status = 200;
+        update_metrics(conn->response_status);
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, n);
+        http_request_free(&req);
+        return req.keep_alive;
+    }
+
+    /* Prometheus 指标端点 */
+    if (strcmp(req.path, "/_metrics") == 0) {
+        time_t now = time(NULL);
+        time_t uptime = now - g_server_start_time;
+        int active = atomic_load(&g_active_connections);
+        unsigned int total = atomic_load(&g_total_requests);
+        unsigned int r2xx = atomic_load(&g_response_2xx);
+        unsigned int r3xx = atomic_load(&g_response_3xx);
+        unsigned int r4xx = atomic_load(&g_response_4xx);
+        unsigned int r5xx = atomic_load(&g_response_5xx);
+        unsigned int r200 = atomic_load(&g_response_200);
+        unsigned int r404 = atomic_load(&g_response_404);
+
+        char body[4096];
+        int n = snprintf(body, sizeof(body),
+            "# HELP cocoon_uptime_seconds Server uptime in seconds\n"
+            "# TYPE cocoon_uptime_seconds gauge\n"
+            "cocoon_uptime_seconds %ld\n"
+            "# HELP cocoon_connections_active Current active connections\n"
+            "# TYPE cocoon_connections_active gauge\n"
+            "cocoon_connections_active %d\n"
+            "# HELP cocoon_connections_max Maximum allowed connections\n"
+            "# TYPE cocoon_connections_max gauge\n"
+            "cocoon_connections_max %u\n"
+            "# HELP cocoon_requests_total Total HTTP requests served\n"
+            "# TYPE cocoon_requests_total counter\n"
+            "cocoon_requests_total %u\n"
+            "# HELP cocoon_response_2xx_total Total 2xx responses\n"
+            "# TYPE cocoon_response_2xx_total counter\n"
+            "cocoon_response_2xx_total %u\n"
+            "# HELP cocoon_response_3xx_total Total 3xx responses\n"
+            "# TYPE cocoon_response_3xx_total counter\n"
+            "cocoon_response_3xx_total %u\n"
+            "# HELP cocoon_response_4xx_total Total 4xx responses\n"
+            "# TYPE cocoon_response_4xx_total counter\n"
+            "cocoon_response_4xx_total %u\n"
+            "# HELP cocoon_response_5xx_total Total 5xx responses\n"
+            "# TYPE cocoon_response_5xx_total counter\n"
+            "cocoon_response_5xx_total %u\n"
+            "# HELP cocoon_response_200_total Total 200 responses\n"
+            "# TYPE cocoon_response_200_total counter\n"
+            "cocoon_response_200_total %u\n"
+            "# HELP cocoon_response_404_total Total 404 responses\n"
+            "# TYPE cocoon_response_404_total counter\n"
+            "cocoon_response_404_total %u\n",
+            uptime, active, g_max_connections,
+            total, r2xx, r3xx, r4xx, r5xx, r200, r404);
+
+        char header[512];
+        int header_len = snprintf(header, sizeof(header),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/plain; version=0.0.4\r\n"
+            "Content-Length: %d\r\n"
+            "Connection: %s\r\n"
+            "Server: Cocoon/1.0\r\n"
+            "\r\n",
+            n, req.keep_alive ? "keep-alive" : "close");
+
+        send_all(conn->fd, header, (size_t)header_len);
+        send_all(conn->fd, body, (size_t)n);
+
+        conn->response_status = 200;
+        update_metrics(conn->response_status);
         access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
                          &req, conn->response_status, n);
         http_request_free(&req);
@@ -517,6 +618,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     int n = snprintf(real_path, sizeof(real_path), "%s%s", root_normalized, req.path);
     if (n < 0 || (size_t)n >= sizeof(real_path)) {
         conn->response_status = 400;
+        update_metrics(conn->response_status);
         static_send_error(conn->fd, 400, req.keep_alive);
         access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
                          &req, conn->response_status, -1);
@@ -530,6 +632,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         if (!cocoon_realpath(real_path, resolved, sizeof(resolved)) ||
             strncmp(resolved, root_normalized, strlen(root_normalized)) != 0) {
             conn->response_status = 403;
+            update_metrics(conn->response_status);
             static_send_error(conn->fd, 403, req.keep_alive);
             access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
                              &req, conn->response_status, -1);
@@ -543,6 +646,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     cocoon_stat_t st;
     if (cocoon_file_stat(real_path, &st) != 0) {
         conn->response_status = 404;
+        update_metrics(conn->response_status);
         static_send_error(conn->fd, 404, req.keep_alive);
         access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
                          &req, conn->response_status, -1);
@@ -555,6 +659,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         char index_path[4096];
         if (snprintf(index_path, sizeof(index_path), "%s/index.html", real_path) >= (int)sizeof(index_path)) {
             conn->response_status = 400;
+            update_metrics(conn->response_status);
             static_send_error(conn->fd, 400, req.keep_alive);
             access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
                              &req, conn->response_status, -1);
@@ -567,6 +672,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
             http_request_t index_req = req;
             if (snprintf(index_req.path, sizeof(index_req.path), "%s/index.html", req.path) >= (int)sizeof(index_req.path)) {
                 conn->response_status = 400;
+                update_metrics(conn->response_status);
                 static_send_error(conn->fd, 400, req.keep_alive);
                 access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
                                  &req, conn->response_status, -1);
@@ -589,6 +695,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         static_send_error(conn->fd, 403, req.keep_alive);
     }
 
+    update_metrics(conn->response_status);
     access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
                      &req, conn->response_status, -1);
     http_request_free(&req);

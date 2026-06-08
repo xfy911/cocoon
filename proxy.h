@@ -17,7 +17,9 @@
 #include <pthread.h>
 #include <time.h>
 
-#define COCOON_MAX_POOL_SIZE 4
+/* === 连接池可配置 === */
+#define COCOON_POOL_MAX_CAPACITY 16  /**< 连接池最大容量上限 */
+#define COCOON_POOL_DEFAULT_SIZE 4   /**< 默认连接池大小 */
 #define COCOON_POOL_IDLE_TIMEOUT_MS 30000
 
 #define COCOON_MAX_PROXY_BACKENDS 8
@@ -38,8 +40,9 @@ typedef struct {
  * cocoon_conn_pool_t - 连接池
  */
 typedef struct {
-    cocoon_pooled_conn_t conns[COCOON_MAX_POOL_SIZE]; /**< 空闲连接数组 */
-    pthread_mutex_t mutex;                            /**< 保护锁 */
+    cocoon_pooled_conn_t conns[COCOON_POOL_MAX_CAPACITY]; /**< 空闲连接数组（上限16） */
+    size_t max_size;                                      /**< 实际配置大小（默认4） */
+    pthread_mutex_t mutex;                                /**< 保护锁 */
 } cocoon_conn_pool_t;
 
 /**
@@ -90,7 +93,7 @@ void proxy_init(cocoon_proxy_config_t *cfg);
  * @param target_url 目标URL（如 "http://localhost:3000"）
  * @return true 成功
  */
-bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *target_url);
+bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *target_url, size_t pool_size);
 
 /**
  * proxy_match - 查找匹配路径的代理规则
@@ -129,7 +132,7 @@ bool proxy_forward(cocoon_socket_t client_fd, const http_request_t *req,
 /**
  * proxy_pool_init - 初始化后端连接池
  */
-void proxy_pool_init(cocoon_proxy_backend_t *backend);
+void proxy_pool_init(cocoon_proxy_backend_t *backend, size_t max_pool_size);
 
 /**
  * proxy_pool_destroy - 销毁后端连接池，关闭所有连接

@@ -56,6 +56,7 @@ typedef struct cocoon_config {
     struct {
         char prefix[256];
         char target[256];
+        uint32_t pool_size;      /* 连接池大小（默认4，最大16） */
     } proxies[COCOON_MAX_PROXY_RULES];
     size_t num_proxies;
 } cocoon_config_t;

@@ -436,6 +436,9 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
                             } else if (strcmp(pk, "target") == 0 && pval.type == TOKEN_STRING) {
                                 char *v = token_str_dup(&pval);
                                 if (v) { strncpy(target, v, sizeof(target)-1); free(v); }
+                            } else if (strcmp(pk, "pool_size") == 0 && pval.type == TOKEN_NUMBER) {
+                                char *v = token_str_dup(&pval);
+                                if (v) { config->proxies[config->num_proxies].pool_size = (uint32_t)atoi(v); free(v); }
                             }
                             free(pk);
                             token_t psep = parser_next_token(&p);
@@ -454,6 +457,9 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
                             if (target_len >= sizeof(config->proxies[0].target)) target_len = sizeof(config->proxies[0].target) - 1;
                             memcpy(config->proxies[config->num_proxies].target, target, target_len);
                             config->proxies[config->num_proxies].target[target_len] = '\0';
+                            if (config->proxies[config->num_proxies].pool_size == 0) {
+                                config->proxies[config->num_proxies].pool_size = 4; /* 默认连接池大小 */
+                            }
                             config->num_proxies++;
                         }
                     } else {

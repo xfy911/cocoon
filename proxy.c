@@ -32,10 +32,17 @@ static void backend_init_health(cocoon_proxy_backend_t *backend) {
     backend->last_check = 0;
 }
 
-void proxy_pool_init(cocoon_proxy_backend_t *backend) {
+void proxy_pool_init(cocoon_proxy_backend_t *backend, size_t max_pool_size) {
     memset(&backend->pool, 0, sizeof(backend->pool));
+    backend->pool.max_size = max_pool_size;
+    if (backend->pool.max_size > COCOON_POOL_MAX_CAPACITY) {
+        backend->pool.max_size = COCOON_POOL_MAX_CAPACITY;
+    }
+    if (backend->pool.max_size == 0) {
+        backend->pool.max_size = COCOON_POOL_DEFAULT_SIZE;
+    }
     pthread_mutex_init(&backend->pool.mutex, NULL);
-    for (size_t i = 0; i < COCOON_MAX_POOL_SIZE; i++) {
+    for (size_t i = 0; i < COCOON_POOL_MAX_CAPACITY; i++) {
         backend->pool.conns[i].fd = COCOON_INVALID_SOCKET;
         backend->pool.conns[i].tls_conn = NULL;
         backend->pool.conns[i].in_use = false;
@@ -46,7 +53,7 @@ void proxy_pool_init(cocoon_proxy_backend_t *backend) {
 void proxy_pool_destroy(cocoon_proxy_backend_t *backend) {
     if (!backend) return;
     pthread_mutex_lock(&backend->pool.mutex);
-    for (size_t i = 0; i < COCOON_MAX_POOL_SIZE; i++) {
+    for (size_t i = 0; i < backend->pool.max_size; i++) {
         cocoon_pooled_conn_t *pc = &backend->pool.conns[i];
         if (pc->fd != COCOON_INVALID_SOCKET) {
             cocoon_socket_close(pc->fd);
@@ -74,7 +81,7 @@ bool proxy_pool_acquire(cocoon_proxy_backend_t *backend, cocoon_socket_t *pfd, p
     pthread_mutex_lock(&backend->pool.mutex);
 
     /* 1. 查找可用空闲连接（未超时） */
-    for (size_t i = 0; i < COCOON_MAX_POOL_SIZE; i++) {
+    for (size_t i = 0; i < backend->pool.max_size; i++) {
         cocoon_pooled_conn_t *pc = &backend->pool.conns[i];
         if (pc->in_use) continue;
         if (pc->fd == COCOON_INVALID_SOCKET && !pc->tls_conn) continue;
@@ -141,7 +148,7 @@ void proxy_pool_release(cocoon_proxy_backend_t *backend, cocoon_socket_t fd, pro
     pthread_mutex_lock(&backend->pool.mutex);
 
     /* 先尝试找到这个连接的槽位（如果它原本就在池中） */
-    for (size_t i = 0; i < COCOON_MAX_POOL_SIZE; i++) {
+    for (size_t i = 0; i < backend->pool.max_size; i++) {
         cocoon_pooled_conn_t *pc = &backend->pool.conns[i];
         if (pc->in_use &&
             ((use_https && pc->tls_conn == tls_conn) ||
@@ -155,7 +162,7 @@ void proxy_pool_release(cocoon_proxy_backend_t *backend, cocoon_socket_t fd, pro
     }
 
     /* 如果是新建连接，找一个空槽位放入 */
-    for (size_t i = 0; i < COCOON_MAX_POOL_SIZE; i++) {
+    for (size_t i = 0; i < backend->pool.max_size; i++) {
         cocoon_pooled_conn_t *pc = &backend->pool.conns[i];
         if (pc->fd == COCOON_INVALID_SOCKET && !pc->tls_conn) {
             pc->fd = fd;
@@ -179,7 +186,7 @@ void proxy_pool_release(cocoon_proxy_backend_t *backend, cocoon_socket_t fd, pro
     }
 }
 
-static void parse_backend_url(const char *target_url, cocoon_proxy_backend_t *backend) {
+static void parse_backend_url(const char *target_url, cocoon_proxy_backend_t *backend, size_t pool_size) {
     /* 解析目标URL */
     bool https = false;
     const char *url = target_url;
@@ -237,10 +244,10 @@ static void parse_backend_url(const char *target_url, cocoon_proxy_backend_t *ba
     }
     
     /* 初始化连接池 */
-    proxy_pool_init(backend);
+    proxy_pool_init(backend, pool_size);
 }
 
-bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *target_url) {
+bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *target_url, size_t pool_size) {
     if (!prefix || !target_url || prefix[0] == '\0' || target_url[0] == '\0') {
         return false;
     }
@@ -261,7 +268,7 @@ bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *
             return false;
         }
         cocoon_proxy_backend_t *backend = &rule->backends[rule->backend_count];
-        parse_backend_url(target_url, backend);
+        parse_backend_url(target_url, backend, pool_size);
         backend_init_health(backend);
         log_info("追加后端: %s -> %s://%s:%d%s",
                  rule->path_prefix,
@@ -286,7 +293,7 @@ bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *
     rule->current_index = 0;
 
     cocoon_proxy_backend_t *backend = &rule->backends[rule->backend_count];
-    parse_backend_url(target_url, backend);
+    parse_backend_url(target_url, backend, pool_size);
     backend_init_health(backend);
     rule->backend_count++;
 

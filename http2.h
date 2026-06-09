@@ -53,6 +53,13 @@ typedef struct http2_stream_data {
     char *response_body;           /**< 响应体（用于动态内容） */
     size_t response_len;           /**< 响应体长度 */
     size_t response_sent;          /**< 已发送的响应体字节数 */
+    /* 流式代理转发字段 */
+    cocoon_socket_t proxy_backend_fd;  /**< 代理后端 socket fd */
+    struct proxy_tls_conn *proxy_tls_conn;  /**< 代理后端 TLS 连接 */
+    bool proxy_use_https;          /**< 后端是否使用 HTTPS */
+    bool proxy_eof;                /**< 后端数据是否读取完毕 */
+    cocoon_proxy_backend_t *proxy_backend; /**< 代理后端指针（用于连接池归还） */
+    bool proxy_close_backend;      /**< 后端是否要求关闭连接 */
 } http2_stream_data_t;
 
 /**

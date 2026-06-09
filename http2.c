@@ -276,6 +276,13 @@ void http2_session_destroy(http2_session_t *h2) {
         if (stream->file_fd >= 0) {
             close(stream->file_fd);
         }
+        if (stream->proxy_backend_fd != COCOON_INVALID_SOCKET) {
+            cocoon_socket_close(stream->proxy_backend_fd);
+        }
+        if (stream->proxy_tls_conn) {
+            proxy_tls_close(stream->proxy_tls_conn);
+            free(stream->proxy_tls_conn);
+        }
         free(stream->response_body);
         http_request_free(&stream->request);
         free(stream);
@@ -378,6 +385,12 @@ int http2_session_upgrade(http2_session_t *h2, const http_request_t *req) {
 
     stream->stream_id = 1;
     stream->file_fd = -1;
+    stream->proxy_backend_fd = COCOON_INVALID_SOCKET;
+    stream->proxy_tls_conn = NULL;
+    stream->proxy_use_https = false;
+    stream->proxy_eof = false;
+    stream->proxy_close_backend = false;
+    stream->proxy_backend = NULL;
     stream->request = *req;
     stream->request.body = NULL;  /* 升级请求通常无 body，避免双重释放 */
     stream->request_complete = true;
@@ -533,6 +546,12 @@ static int on_begin_headers_callback(nghttp2_session *session __attribute__((unu
 
     stream->stream_id = frame->hd.stream_id;
     stream->file_fd = -1;
+    stream->proxy_backend_fd = COCOON_INVALID_SOCKET;
+    stream->proxy_tls_conn = NULL;
+    stream->proxy_use_https = false;
+    stream->proxy_eof = false;
+    stream->proxy_close_backend = false;
+    stream->proxy_backend = NULL;
 
     /* 插入链表头部 */
     stream->next = h2->streams;
@@ -881,6 +900,102 @@ static ssize_t http2_data_source_read_callback(
         *data_flags |= NGHTTP2_DATA_FLAG_EOF;
     }
     return (ssize_t)to_send;
+}
+
+/**
+ * proxy_data_source_read_callback - 流式代理数据读取回调
+ *
+ * 从后端 socket/TLS 连接实时读取数据，供 nghttp2 发送 DATA 帧。
+ * 实现 HTTP/2 代理响应的流式转发，避免完整缓冲大响应体。
+ * 数据读取完毕后关闭后端连接并归还连接池。
+ *
+ * @param session nghttp2 会话（未使用）
+ * @param stream_id 流 ID（未使用）
+ * @param buf 输出缓冲区
+ * @param length 最大读取长度
+ * @param data_flags 输出标志（设置 EOF）
+ * @param source 数据源（含 stream 指针）
+ * @param user_data 未使用
+ * @return 读取字节数，0 表示 EOF，NGHTTP2_ERR_DEFERRED 表示暂时无数据
+ */
+static ssize_t proxy_data_source_read_callback(
+    nghttp2_session *session __attribute__((unused)),
+    int32_t stream_id __attribute__((unused)),
+    uint8_t *buf, size_t length,
+    uint32_t *data_flags,
+    nghttp2_data_source *source,
+    void *user_data __attribute__((unused))) {
+
+    http2_stream_data_t *stream = (http2_stream_data_t *)source->ptr;
+    if (!stream || stream->proxy_eof) {
+        *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+        return 0;
+    }
+
+    /* 先返回已缓存的 body（recv_headers 已读取的部分） */
+    if (stream->response_body && stream->response_sent < stream->response_len) {
+        size_t remaining = stream->response_len - stream->response_sent;
+        size_t to_send = length < remaining ? length : remaining;
+        memcpy(buf, stream->response_body + stream->response_sent, to_send);
+        stream->response_sent += to_send;
+
+        if (stream->response_sent >= stream->response_len) {
+            /* 缓存已发完，释放 */
+            free(stream->response_body);
+            stream->response_body = NULL;
+            stream->response_len = 0;
+            stream->response_sent = 0;
+        }
+        return (ssize_t)to_send;
+    }
+
+    ssize_t r = 0;
+    if (stream->proxy_use_https && stream->proxy_tls_conn) {
+        r = proxy_tls_read(stream->proxy_tls_conn, buf, length);
+    } else if (stream->proxy_backend_fd != COCOON_INVALID_SOCKET) {
+        r = recv(stream->proxy_backend_fd, buf, length, 0);
+    } else {
+        *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+        return 0;
+    }
+
+    if (r > 0) {
+        return (ssize_t)r;
+    } else if (r == 0) {
+        /* 后端关闭连接 */
+        stream->proxy_eof = true;
+        *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+    } else {
+        if (errno == EAGAIN || errno == EINTR) {
+            /* 暂时无数据，让 nghttp2 稍后重试 */
+            return NGHTTP2_ERR_DEFERRED;
+        }
+        /* 读取错误，结束流 */
+        stream->proxy_eof = true;
+        *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+    }
+
+    /* 关闭后端连接或归还连接池 */
+    if (stream->proxy_use_https && stream->proxy_tls_conn) {
+        if (stream->proxy_close_backend) {
+            proxy_tls_close(stream->proxy_tls_conn);
+            free(stream->proxy_tls_conn);
+        }
+        /* 注意：连接池不支持 HTTPS，所以直接关闭 */
+        stream->proxy_tls_conn = NULL;
+    } else if (stream->proxy_backend_fd != COCOON_INVALID_SOCKET) {
+        if (stream->proxy_close_backend) {
+            cocoon_socket_close(stream->proxy_backend_fd);
+        } else if (stream->proxy_backend) {
+            proxy_pool_release(stream->proxy_backend, stream->proxy_backend_fd, NULL);
+        } else {
+            cocoon_socket_close(stream->proxy_backend_fd);
+        }
+        stream->proxy_backend_fd = COCOON_INVALID_SOCKET;
+        stream->proxy_backend = NULL;
+    }
+
+    return 0;
 }
 
 /**
@@ -1652,15 +1767,22 @@ static void http2_serve_proxy(http2_session_t *h2, http2_stream_data_t *stream) 
         backend_wants_close = true;
     }
 
-    /* 归还或关闭连接 */
-    if (backend_wants_close) {
-        if (use_https && tls_conn) {
-            proxy_tls_close(tls_conn);
-        } else if (backend_fd != COCOON_INVALID_SOCKET) {
-            cocoon_socket_close(backend_fd);
+    /* 保存后端连接信息到流，供流式回调使用 */
+    stream->proxy_backend_fd = backend_fd;
+    stream->proxy_tls_conn = tls_conn;
+    stream->proxy_use_https = use_https;
+    stream->proxy_eof = false;
+    stream->proxy_close_backend = backend_wants_close;
+    stream->proxy_backend = backend;
+
+    /* 缓存已读取的 body（recv_headers 可能已经读取部分 body） */
+    if (body_len > 0) {
+        stream->response_body = (char *)malloc(body_len);
+        if (stream->response_body) {
+            memcpy(stream->response_body, body, body_len);
+            stream->response_len = body_len;
+            stream->response_sent = 0;
         }
-    } else {
-        proxy_pool_release(backend, backend_fd, tls_conn);
     }
 
     /* 构建 HTTP/2 响应 */
@@ -1710,14 +1832,14 @@ static void http2_serve_proxy(http2_session_t *h2, http2_stream_data_t *stream) 
             continue;
         }
 
-        /* 跳过 content-length（由 body 决定） */
+        /* 跳过 content-length（流式转发不需要） */
         if (strcmp(name_lower, "content-length") == 0) {
             p = nl + 2;
             continue;
         }
 
         /* 创建 nghttp2_nv（nghttp2 不会修改这些内存，但要求非 const） */
-        hdrs[num_hdrs].name = (uint8_t *)p;  /* 指向 response_buf 内部，生命周期足够 */
+        hdrs[num_hdrs].name = (uint8_t *)p;  /* 指向 headers 内部，生命周期足够 */
         hdrs[num_hdrs].value = (uint8_t *)value;
         hdrs[num_hdrs].namelen = name_len;
         hdrs[num_hdrs].valuelen = value_len;
@@ -1726,24 +1848,11 @@ static void http2_serve_proxy(http2_session_t *h2, http2_stream_data_t *stream) 
         p = nl + 2;
     }
 
-    /* 存储 body 到流 */
-    if (body_len > 0) {
-        stream->response_body = (char *)malloc(body_len);
-        if (stream->response_body) {
-            memcpy(stream->response_body, body, body_len);
-            stream->response_len = body_len;
-            stream->response_sent = 0;
-        }
-    }
-
-    if (stream->response_body && stream->response_len > 0) {
-        nghttp2_data_provider provider;
-        provider.source.ptr = stream;
-        provider.read_callback = http2_data_source_read_callback;
-        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, num_hdrs, &provider);
-    } else {
-        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, num_hdrs, NULL);
-    }
+    /* 使用流式回调发送响应 */
+    nghttp2_data_provider provider;
+    provider.source.ptr = stream;
+    provider.read_callback = proxy_data_source_read_callback;
+    nghttp2_submit_response(h2->session, stream->stream_id, hdrs, num_hdrs, &provider);
 }
 
 /**

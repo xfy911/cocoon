@@ -22,6 +22,16 @@
 #define COCOON_FORBIDDEN    -4   /**< 禁止访问 */
 #define COCOON_BADREQUEST  -5   /**< 请求格式错误 */
 
+/**
+ * cocoon_healthcheck_config_t - 健康检查配置
+ */
+typedef struct {
+    char path[256];         /* 探测路径（默认 /health） */
+    uint32_t interval_ms;   /* 探测间隔（毫秒，默认5000） */
+    uint32_t timeout_ms;    /* 探测超时（毫秒，默认2000） */
+    bool enabled;           /* 是否启用（默认 false） */
+} cocoon_healthcheck_config_t;
+
 /* === 服务器配置 === */
 /**
  * cocoon_config - 服务器配置结构体
@@ -58,6 +68,8 @@ typedef struct cocoon_config {
         char target[256];
         uint32_t pool_size;      /* 连接池大小（默认4，最大16） */
         uint32_t weight;         /* 权重（默认1） */
+        /* 主动健康检查 */
+        cocoon_healthcheck_config_t healthcheck;
     } proxies[COCOON_MAX_PROXY_RULES];
     size_t num_proxies;
 } cocoon_config_t;

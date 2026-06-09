@@ -249,7 +249,7 @@ static void parse_backend_url(const char *target_url, cocoon_proxy_backend_t *ba
     proxy_pool_init(backend, pool_size);
 }
 
-bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *target_url, size_t pool_size, uint32_t weight) {
+bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *target_url, size_t pool_size, uint32_t weight, const cocoon_healthcheck_config_t *hc) {
     if (!prefix || !target_url || prefix[0] == '\0' || target_url[0] == '\0') {
         return false;
     }
@@ -272,6 +272,9 @@ bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *
         cocoon_proxy_backend_t *backend = &rule->backends[rule->backend_count];
         parse_backend_url(target_url, backend, pool_size);
         backend_init(backend, weight);
+        if (hc) {
+            backend->hc_config = *hc;
+        }
         log_info("追加后端: %s -> %s://%s:%d%s (weight=%u)",
                  rule->path_prefix,
                  backend->target_https ? "https" : "http",
@@ -298,6 +301,9 @@ bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *
     cocoon_proxy_backend_t *backend = &rule->backends[rule->backend_count];
     parse_backend_url(target_url, backend, pool_size);
     backend_init(backend, weight);
+    if (hc) {
+        backend->hc_config = *hc;
+    }
     rule->backend_count++;
 
     log_info("添加代理规则: %s -> %s://%s:%d%s (weight=%u)",

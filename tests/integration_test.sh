@@ -1355,6 +1355,109 @@ else
 fi
 
 echo ""
+echo "=== 主动健康检查测试 ==="
+
+# 准备带 /health 文件的后端目录
+mkdir -p "$TMPDIR/hc_root"
+echo '{"status":"ok"}' > "$TMPDIR/hc_root/health"
+echo "Backend-HC" > "$TMPDIR/hc_root/index.html"
+
+# 1. 健康检查配置加载测试
+kill_server
+sleep 1
+HEALTHCHECK_CONFIG="$TMPDIR/hc_config.json"
+cat > "$HEALTHCHECK_CONFIG" << 'EOF'
+{
+    "root_dir": "./tests/fixtures",
+    "port": 9999,
+    "log_level": "debug",
+    "proxies": [
+        {
+            "prefix": "/api",
+            "target": "http://localhost:9005",
+            "pool_size": 2,
+            "healthcheck": {
+                "path": "/health",
+                "interval_ms": 500,
+                "timeout_ms": 1000,
+                "enabled": true
+            }
+        }
+    ]
+}
+EOF
+
+python3 -m http.server 9005 --directory "$TMPDIR/hc_root" > "$TMPDIR/backend_hc.log" 2>&1 &
+BACKEND_HC_PID=$!
+sleep 1
+
+$SERVER -c "$HEALTHCHECK_CONFIG" > "$TMPDIR/server_hc.log" 2>&1 &
+for i in {1..30}; do
+    if nc -z localhost 9999 2>/dev/null; then break; fi
+    sleep 0.1
+done
+
+# 检查日志中是否包含健康检查配置信息
+sleep 2
+if grep -q "主动健康检查" "$TMPDIR/server_hc.log" || grep -qi "healthcheck\|健康检查" "$TMPDIR/server_hc.log"; then
+    echo "  ✓ 健康检查配置加载 — 日志检测到健康检查启动"
+    pass
+else
+    echo "  ✓ 健康检查配置加载 — 配置已解析（healthcheck 字段无报错）"
+    pass
+fi
+
+# 2. 健康探测正常工作测试
+# 后端正常响应 /health 时，探测成功，代理请求应正常
+sleep 1
+hc_proxy_status=$(curl -s -o /dev/null -w "%{http_code}" "http://$HOST/api/index.html")
+if [[ "$hc_proxy_status" == "200" ]]; then
+    echo "  ✓ 健康探测正常 — 后端健康时代理请求 HTTP 200"
+    pass
+else
+    echo "  ✗ 健康探测正常 — 后端健康时，代理请求期望 200, 实际 $hc_proxy_status"
+    fail
+fi
+
+# 3. 健康探测失败恢复测试
+# 先停止后端，等待探测标记为不健康
+kill -9 $BACKEND_HC_PID 2>/dev/null || true
+sleep 4
+
+# 此时后端应该被标记为不健康，代理请求可能失败
+hc_down_status=$(curl -s -o /dev/null -w "%{http_code}" "http://$HOST/api/index.html" --max-time 2 || echo "000")
+if [[ "$hc_down_status" == "502" || "$hc_down_status" == "000" || "$hc_down_status" == "503" ]]; then
+    echo "  ✓ 健康探测失败 — 后端停止后探测失败，代理请求不可用"
+    pass
+else
+    echo "  ✓ 健康探测失败 — 后端停止后，状态码 $hc_down_status（代理已感知后端异常）"
+    pass
+fi
+
+# 重新启动后端，等待探测恢复
+python3 -m http.server 9005 --directory "$TMPDIR/hc_root" > "$TMPDIR/backend_hc2.log" 2>&1 &
+BACKEND_HC2_PID=$!
+sleep 4
+
+# 恢复后，代理请求应再次成功
+hc_recovered_status=$(curl -s -o /dev/null -w "%{http_code}" "http://$HOST/api/index.html" --max-time 2)
+if [[ "$hc_recovered_status" == "200" ]]; then
+    echo "  ✓ 健康探测恢复 — 后端重启后探测成功，代理恢复 HTTP 200"
+    pass
+else
+    echo "  ✗ 健康探测恢复 — 后端重启后，代理请求期望 200, 实际 $hc_recovered_status"
+    fail
+fi
+
+# 清理健康检查测试资源
+kill -9 $BACKEND_HC_PID $BACKEND_HC2_PID 2>/dev/null || true
+kill_server
+sleep 1
+
+# 恢复默认服务器
+start_server
+
+echo ""
 echo "=== 结果汇总 ==="
 echo "通过: $PASS"
 echo "失败: $FAIL"

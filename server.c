@@ -29,6 +29,7 @@
 #include "platform.h"
 #include "middleware.h"
 #include "proxy.h"
+#include "healthcheck.h"
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -70,6 +71,7 @@ struct server_context {
     cocoon_config_t     config;       /**< 配置副本 */
     cocoon_middleware_config_t mw_config; /**< 中间件配置（持久化，避免栈变量悬空） */
     cocoon_proxy_config_t proxy_config; /**< 反向代理配置 */
+    cocoon_healthcheck_manager_t hc_manager; /**< 主动健康检查管理器 */
     volatile int        running;      /**< 运行标志 */
     coco_sched_t       *sched;        /**< 协程调度器 */
 };
@@ -1268,7 +1270,7 @@ server_context_t *server_create(const cocoon_config_t *config) {
     /* 初始化反向代理配置 */
     proxy_init(&ctx->proxy_config);
     for (size_t i = 0; i < ctx->config.num_proxies; i++) {
-        proxy_add_rule(&ctx->proxy_config, ctx->config.proxies[i].prefix, ctx->config.proxies[i].target, ctx->config.proxies[i].pool_size, ctx->config.proxies[i].weight);
+        proxy_add_rule(&ctx->proxy_config, ctx->config.proxies[i].prefix, ctx->config.proxies[i].target, ctx->config.proxies[i].pool_size, ctx->config.proxies[i].weight, &ctx->config.proxies[i].healthcheck);
     }
 
     /* 加载插件 */
@@ -1277,6 +1279,10 @@ server_context_t *server_create(const cocoon_config_t *config) {
             log_error("插件加载失败: %s", ctx->config.plugins[i]);
         }
     }
+
+    /* 启动主动健康检查 */
+    healthcheck_manager_init(&ctx->hc_manager);
+    healthcheck_start(&ctx->hc_manager, &ctx->proxy_config, ctx->config.timeout_ms);
 
     return ctx;
 }
@@ -1352,6 +1358,9 @@ void server_stop(server_context_t *ctx) {
  */
 void server_destroy(server_context_t *ctx) {
     if (!ctx) return;
+
+    /* 停止主动健康检查 */
+    healthcheck_stop(&ctx->hc_manager);
 
     /* 关闭反向代理连接池 */
     proxy_config_destroy(&ctx->proxy_config);

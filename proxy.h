@@ -63,6 +63,8 @@ typedef struct {
     /* 权重 */
     uint32_t weight;         /**< 配置权重（默认1） */
     int32_t  current_weight; /**< 当前动态权重（平滑轮询算法用） */
+    /* 主动健康检查配置 */
+    cocoon_healthcheck_config_t hc_config; /**< 健康检查配置 */
 } cocoon_proxy_backend_t;
 
 /**
@@ -94,9 +96,12 @@ void proxy_init(cocoon_proxy_config_t *cfg);
  * @param cfg 代理配置
  * @param prefix 路径前缀（如 "/api/"）
  * @param target_url 目标URL（如 "http://localhost:3000"）
+ * @param pool_size 连接池大小
+ * @param weight 权重
+ * @param hc 健康检查配置（可为 NULL）
  * @return true 成功
  */
-bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *target_url, size_t pool_size, uint32_t weight);
+bool proxy_add_rule(cocoon_proxy_config_t *cfg, const char *prefix, const char *target_url, size_t pool_size, uint32_t weight, const cocoon_healthcheck_config_t *hc);
 
 /**
  * proxy_match - 查找匹配路径的代理规则

@@ -442,6 +442,35 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
                             } else if (strcmp(pk, "weight") == 0 && pval.type == TOKEN_NUMBER) {
                                 char *v = token_str_dup(&pval);
                                 if (v) { config->proxies[config->num_proxies].weight = (uint32_t)atoi(v); free(v); }
+                            } else if (strcmp(pk, "healthcheck") == 0 && pval.type == TOKEN_LBRACE) {
+                                /* 解析 healthcheck 子对象 */
+                                while (1) {
+                                    token_t hc_key = parser_next_token(&p);
+                                    if (hc_key.type == TOKEN_RBRACE) break;
+                                    if (hc_key.type != TOKEN_STRING) {
+                                        token_t skip_sep = parser_next_token(&p);
+                                        if (skip_sep.type == TOKEN_RBRACE) break;
+                                        continue;
+                                    }
+                                    if (!token_expect(&p, TOKEN_COLON)) break;
+                                    token_t hc_val = parser_next_token(&p);
+                                    char *hk = token_str_dup(&hc_key);
+                                    if (strcmp(hk, "path") == 0 && hc_val.type == TOKEN_STRING) {
+                                        char *v = token_str_dup(&hc_val);
+                                        if (v) { strncpy(config->proxies[config->num_proxies].healthcheck.path, v, sizeof(config->proxies[0].healthcheck.path)-1); free(v); }
+                                    } else if (strcmp(hk, "interval_ms") == 0 && hc_val.type == TOKEN_NUMBER) {
+                                        config->proxies[config->num_proxies].healthcheck.interval_ms = (uint32_t)token_to_long(&hc_val);
+                                    } else if (strcmp(hk, "timeout_ms") == 0 && hc_val.type == TOKEN_NUMBER) {
+                                        config->proxies[config->num_proxies].healthcheck.timeout_ms = (uint32_t)token_to_long(&hc_val);
+                                    } else if (strcmp(hk, "enabled") == 0) {
+                                        if (hc_val.type == TOKEN_TRUE) config->proxies[config->num_proxies].healthcheck.enabled = true;
+                                        else if (hc_val.type == TOKEN_FALSE) config->proxies[config->num_proxies].healthcheck.enabled = false;
+                                    }
+                                    free(hk);
+                                    token_t hc_sep = parser_next_token(&p);
+                                    if (hc_sep.type == TOKEN_RBRACE) break;
+                                    if (hc_sep.type != TOKEN_COMMA) break;
+                                }
                             }
                             free(pk);
                             token_t psep = parser_next_token(&p);

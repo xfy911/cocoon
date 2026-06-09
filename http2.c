@@ -144,8 +144,7 @@ static int on_data_chunk_recv_callback(nghttp2_session *session,
 static ssize_t http2_data_source_read_callback(nghttp2_session *session, int32_t stream_id,
                                                uint8_t *buf, size_t length, uint32_t *data_flags,
                                                nghttp2_data_source *source, void *user_data);
-static bool http2_serve_directory(http2_session_t *h2, http2_stream_data_t *stream,
-                                   const char *real_path, const char *request_path);
+static void http2_serve_proxy(http2_session_t *h2, http2_stream_data_t *stream);
 static void http2_serve_static(http2_session_t *h2, http2_stream_data_t *stream);
 static void http2_serve_post(http2_session_t *h2, http2_stream_data_t *stream);
 
@@ -323,6 +322,19 @@ void http2_session_set_context(http2_session_t *h2, const char *root_dir, bool g
     h2->root_dir = root_dir;
     h2->gzip_enabled = gzip_enabled;
     h2->brotli_enabled = brotli_enabled;
+}
+
+/**
+ * http2_session_set_proxy_config - 设置会话的反向代理配置
+ *
+ * @param h2           会话指针
+ * @param proxy_config 反向代理配置
+ * @param client_addr  客户端地址
+ */
+void http2_session_set_proxy_config(http2_session_t *h2, cocoon_proxy_config_t *proxy_config, struct sockaddr_storage *client_addr) {
+    if (!h2) return;
+    h2->proxy_config = proxy_config;
+    h2->client_addr = client_addr;
 }
 
 /**
@@ -633,7 +645,9 @@ static int on_frame_recv_callback(nghttp2_session *session,
             stream->request_complete = true;
 
             /* 根据请求方法选择处理方式 */
-            if (stream->request.method == HTTP_POST) {
+            if (h2->proxy_config && proxy_match(h2->proxy_config, stream->request.path)) {
+                http2_serve_proxy(h2, stream);
+            } else if (stream->request.method == HTTP_POST) {
                 http2_serve_post(h2, stream);
             } else {
                 /* 处理静态文件请求（GET/HEAD/OPTIONS等） */
@@ -1157,6 +1171,528 @@ static void http2_serve_post(http2_session_t *h2, http2_stream_data_t *stream) {
     provider.source.ptr = stream;
     provider.read_callback = http2_data_source_read_callback;
     nghttp2_submit_response(h2->session, stream->stream_id, hdrs, num_hdrs, &provider);
+}
+
+/* ===================== HTTP/2 代理转发 ===================== */
+
+/**
+ * is_hop_by_hop_header - 判断是否是 hop-by-hop 头
+ *
+ * 这些头在 HTTP/2 中不允许出现，需要从后端响应中过滤掉。
+ */
+static bool is_hop_by_hop_header(const char *name) {
+    return (strcasecmp(name, "connection") == 0 ||
+            strcasecmp(name, "keep-alive") == 0 ||
+            strcasecmp(name, "transfer-encoding") == 0 ||
+            strcasecmp(name, "proxy-connection") == 0 ||
+            strcasecmp(name, "upgrade") == 0 ||
+            strcasecmp(name, "te") == 0);
+}
+
+/**
+ * build_forwarded_path - 构建转发路径（复制 proxy.c 逻辑）
+ */
+static void build_forwarded_path(const cocoon_proxy_rule_t *rule,
+                                 const cocoon_proxy_backend_t *backend,
+                                 const char *original_path,
+                                 char *out, size_t out_len) {
+    size_t prefix_len = strlen(rule->path_prefix);
+    const char *remaining = original_path + prefix_len;
+
+    if (backend->target_path[0] == '\0') {
+        if (remaining[0] == '\0') {
+            strncpy(out, "/", out_len - 1);
+        } else {
+            strncpy(out, remaining, out_len - 1);
+        }
+    } else {
+        int n = snprintf(out, out_len, "%s%s", backend->target_path, remaining);
+        if (n < 0 || (size_t)n >= out_len) {
+            out[out_len - 1] = '\0';
+        }
+    }
+    out[out_len - 1] = '\0';
+}
+
+/**
+ * build_xff - 构建 X-Forwarded-For 值
+ */
+static void build_xff(const struct sockaddr_storage *client_addr,
+                      char *out, size_t out_len) {
+    if (client_addr->ss_family == AF_INET) {
+        struct sockaddr_in *sin = (struct sockaddr_in *)client_addr;
+        inet_ntop(AF_INET, &sin->sin_addr, out, (socklen_t)out_len);
+    } else if (client_addr->ss_family == AF_INET6) {
+        struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)client_addr;
+        inet_ntop(AF_INET6, &sin6->sin6_addr, out, (socklen_t)out_len);
+    } else {
+        strncpy(out, "unknown", out_len - 1);
+        out[out_len - 1] = '\0';
+    }
+}
+
+/**
+ * send_all_fd - 确保数据全部通过 socket 发送
+ */
+static int send_all_fd(cocoon_socket_t fd, const char *data, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = send(fd, data + sent, len - sent, 0);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) return -1;
+        sent += (size_t)n;
+    }
+    return 0;
+}
+
+/**
+ * proxy_send_all_tls - 通过 TLS 连接发送全部数据
+ */
+static int proxy_send_all_tls(proxy_tls_conn_t *conn, const char *data, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = proxy_tls_write(conn, data + sent, len - sent);
+        if (n > 0) {
+            sent += (size_t)n;
+        } else if (n < 0) {
+            if (errno == EAGAIN || errno == EINTR) continue;
+            return -1;
+        } else {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/**
+ * recv_headers - 读取 HTTP 响应头（直到 \r\n\r\n）
+ */
+static ssize_t recv_headers(cocoon_socket_t fd, char *buf, size_t max_len) {
+    size_t total = 0;
+    while (total < max_len) {
+        ssize_t n = recv(fd, buf + total, max_len - total, 0);
+        if (n > 0) {
+            total += (size_t)n;
+            if (total >= 4) {
+                for (size_t i = 0; i <= total - 4; i++) {
+                    if (memcmp(buf + i, "\r\n\r\n", 4) == 0) {
+                        return (ssize_t)total;
+                    }
+                }
+            }
+        } else if (n == 0) {
+            return (ssize_t)total;
+        } else {
+            if (errno == EAGAIN || errno == EINTR) continue;
+            return -1;
+        }
+    }
+    return (ssize_t)total;
+}
+
+/**
+ * recv_headers_tls - 通过 TLS 读取 HTTP 响应头
+ */
+static ssize_t recv_headers_tls(proxy_tls_conn_t *conn, char *buf, size_t max_len) {
+    size_t total = 0;
+    while (total < max_len) {
+        ssize_t n = proxy_tls_read(conn, buf + total, max_len - total);
+        if (n > 0) {
+            total += (size_t)n;
+            if (total >= 4) {
+                for (size_t i = 0; i <= total - 4; i++) {
+                    if (memcmp(buf + i, "\r\n\r\n", 4) == 0) {
+                        return (ssize_t)total;
+                    }
+                }
+            }
+        } else if (n == 0) {
+            return (ssize_t)total;
+        } else {
+            if (errno == EAGAIN || errno == EINTR) continue;
+            return -1;
+        }
+    }
+    return (ssize_t)total;
+}
+
+/**
+ * parse_http1_response - 解析 HTTP/1.1 响应
+ *
+ * 解析状态行、头、body。body 指向 buf 内部。
+ */
+static bool parse_http1_response(const char *data, size_t len,
+                                 int *status, char *headers, size_t *headers_len,
+                                 const char **body, size_t *body_len) {
+    const char *p = data;
+    const char *end = data + len;
+
+    /* 找第一行 \r\n */
+    const char *line_end = memmem(p, end - p, "\r\n", 2);
+    if (!line_end) return false;
+
+    /* 解析状态行 */
+    if (strncmp(p, "HTTP/1.1 ", 9) != 0 && strncmp(p, "HTTP/1.0 ", 9) != 0) {
+        return false;
+    }
+
+    *status = atoi(p + 9);
+
+    /* 找空行 */
+    p = line_end + 2;
+    const char *blank = memmem(p, end - p, "\r\n\r\n", 4);
+    if (!blank) return false;
+
+    size_t hdr_len = (size_t)(blank - p);
+    if (hdr_len >= *headers_len) hdr_len = *headers_len - 1;
+    memcpy(headers, p, hdr_len);
+    headers[hdr_len] = '\0';
+    *headers_len = hdr_len;
+
+    *body = blank + 4;
+    size_t body_offset = (size_t)(blank + 4 - data);
+    if (len > body_offset) {
+        *body_len = len - body_offset;
+    } else {
+        *body_len = 0;
+    }
+
+    return true;
+}
+
+/**
+ * parse_content_length - 从头中解析 Content-Length
+ */
+static long parse_content_length(const char *headers) {
+    const char *p = headers;
+    while (*p) {
+        if (strncasecmp(p, "content-length:", 15) == 0) {
+            p += 15;
+            while (*p == ' ' || *p == '\t') p++;
+            return atol(p);
+        }
+        const char *nl = strstr(p, "\r\n");
+        if (!nl) break;
+        p = nl + 2;
+    }
+    return -1;
+}
+
+/**
+ * http2_serve_proxy - 处理 HTTP/2 代理转发
+ *
+ * 将 HTTP/2 请求转换为 HTTP/1.1 请求发送给后端，
+ * 收集完整响应后转换为 HTTP/2 响应发回客户端。
+ *
+ * @param h2     会话指针
+ * @param stream 流数据
+ */
+static void http2_serve_proxy(http2_session_t *h2, http2_stream_data_t *stream) {
+    if (!h2->proxy_config) {
+        nghttp2_nv hdrs[] = { {(uint8_t *)":status", (uint8_t *)"502", 7, 3, 0} };
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+        return;
+    }
+
+    cocoon_proxy_rule_t *rule = proxy_match(h2->proxy_config, stream->request.path);
+    if (!rule || rule->backend_count == 0) {
+        nghttp2_nv hdrs[] = { {(uint8_t *)":status", (uint8_t *)"502", 7, 3, 0} };
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+        return;
+    }
+
+    /* 选择后端：优先健康后端 */
+    cocoon_proxy_backend_t *backend = NULL;
+    for (size_t i = 0; i < rule->backend_count; i++) {
+        if (rule->backends[i].healthy) {
+            backend = &rule->backends[i];
+            break;
+        }
+    }
+    if (!backend) {
+        backend = &rule->backends[0];
+    }
+
+    bool use_https = backend->target_https;
+    cocoon_socket_t backend_fd = COCOON_INVALID_SOCKET;
+    proxy_tls_conn_t *tls_conn = NULL;
+
+    if (!proxy_pool_acquire(backend, &backend_fd, &tls_conn)) {
+        log_warn("HTTP/2 代理无法获取后端连接: %s", stream->request.path);
+        nghttp2_nv hdrs[] = { {(uint8_t *)":status", (uint8_t *)"502", 7, 3, 0} };
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+        return;
+    }
+
+    /* 构建转发路径 */
+    char forwarded_path[512];
+    build_forwarded_path(rule, backend, stream->request.path, forwarded_path, sizeof(forwarded_path));
+
+    /* 构建 X-Forwarded-For */
+    char xff[64] = "unknown";
+    if (h2->client_addr) {
+        build_xff(h2->client_addr, xff, sizeof(xff));
+    }
+
+    /* 构建 HTTP/1.1 请求 */
+    char request_buf[4096];
+    int n = snprintf(request_buf, sizeof(request_buf),
+        "%s %s HTTP/1.1\r\n"
+        "Host: %s:%d\r\n"
+        "X-Forwarded-For: %s\r\n"
+        "X-Forwarded-Proto: %s\r\n"
+        "Connection: keep-alive\r\n",
+        http_method_str(stream->request.method),
+        forwarded_path,
+        backend->target_host,
+        backend->target_port,
+        xff,
+        use_https ? "https" : "http");
+
+    /* 透传普通请求头（过滤 hop-by-hop） */
+    for (int i = 0; i < stream->request.num_headers; i++) {
+        if (is_hop_by_hop_header(stream->request.headers[i].name)) continue;
+        n += snprintf(request_buf + n, sizeof(request_buf) - n,
+            "%s: %s\r\n",
+            stream->request.headers[i].name,
+            stream->request.headers[i].value);
+    }
+
+    if (stream->request.content_length > 0) {
+        n += snprintf(request_buf + n, sizeof(request_buf) - n,
+            "Content-Length: %ld\r\n", (long)stream->request.content_length);
+    }
+
+    n += snprintf(request_buf + n, sizeof(request_buf) - n, "\r\n");
+
+    /* 发送请求头 */
+    bool send_ok = true;
+    if (use_https) {
+        if (proxy_send_all_tls(tls_conn, request_buf, (size_t)n) != 0) send_ok = false;
+    } else {
+        if (send_all_fd(backend_fd, request_buf, (size_t)n) != 0) send_ok = false;
+    }
+
+    /* 发送请求体 */
+    if (send_ok && stream->request.body && stream->request.body_len > 0) {
+        if (use_https) {
+            if (proxy_send_all_tls(tls_conn, stream->request.body, stream->request.body_len) != 0) send_ok = false;
+        } else {
+            if (send_all_fd(backend_fd, stream->request.body, stream->request.body_len) != 0) send_ok = false;
+        }
+    }
+
+    if (!send_ok) {
+        log_warn("HTTP/2 代理发送请求到后端失败: %s", stream->request.path);
+        if (use_https && tls_conn) proxy_tls_close(tls_conn);
+        else if (backend_fd != COCOON_INVALID_SOCKET) cocoon_socket_close(backend_fd);
+        nghttp2_nv hdrs[] = { {(uint8_t *)":status", (uint8_t *)"502", 7, 3, 0} };
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+        return;
+    }
+
+    /* 接收响应头 */
+    char response_buf[65536];
+    ssize_t received = 0;
+
+    if (use_https) {
+        received = recv_headers_tls(tls_conn, response_buf, sizeof(response_buf));
+    } else {
+        received = recv_headers(backend_fd, response_buf, sizeof(response_buf));
+    }
+
+    if (received <= 0) {
+        log_warn("HTTP/2 代理接收后端响应头失败: %s", stream->request.path);
+        if (use_https && tls_conn) proxy_tls_close(tls_conn);
+        else if (backend_fd != COCOON_INVALID_SOCKET) cocoon_socket_close(backend_fd);
+        nghttp2_nv hdrs[] = { {(uint8_t *)":status", (uint8_t *)"502", 7, 3, 0} };
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+        return;
+    }
+
+    /* 解析响应 */
+    int status = 0;
+    char headers[32768];
+    size_t headers_len = sizeof(headers);
+    const char *body = NULL;
+    size_t body_len = 0;
+
+    if (!parse_http1_response(response_buf, (size_t)received, &status, headers, &headers_len, &body, &body_len)) {
+        log_warn("HTTP/2 代理解析后端响应失败: %s", stream->request.path);
+        if (use_https && tls_conn) proxy_tls_close(tls_conn);
+        else if (backend_fd != COCOON_INVALID_SOCKET) cocoon_socket_close(backend_fd);
+        nghttp2_nv hdrs[] = { {(uint8_t *)":status", (uint8_t *)"502", 7, 3, 0} };
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
+        return;
+    }
+
+    /* 检查是否需要继续读取 body */
+    long content_length = parse_content_length(headers);
+    if (content_length > 0) {
+        size_t total_body = body_len;
+        size_t offset = (size_t)(body - response_buf);
+
+        while (total_body < (size_t)content_length &&
+               offset + total_body < sizeof(response_buf)) {
+            ssize_t need = (ssize_t)content_length - (ssize_t)total_body;
+            if (need > (ssize_t)(sizeof(response_buf) - offset - total_body)) {
+                need = (ssize_t)(sizeof(response_buf) - offset - total_body);
+            }
+            if (need <= 0) break;
+
+            ssize_t r;
+            if (use_https) {
+                r = proxy_tls_read(tls_conn, response_buf + offset + total_body, (size_t)need);
+            } else {
+                r = recv(backend_fd, response_buf + offset + total_body, (size_t)need, 0);
+            }
+            if (r > 0) {
+                total_body += (size_t)r;
+            } else if (r == 0) {
+                break;
+            } else {
+                if (errno == EAGAIN || errno == EINTR) continue;
+                break;
+            }
+        }
+        body_len = total_body;
+    } else if (content_length < 0) {
+        /* 无 Content-Length，尝试读取剩余数据 */
+        size_t total_body = body_len;
+        size_t offset = (size_t)(body - response_buf);
+        while (offset + total_body < sizeof(response_buf)) {
+            ssize_t r;
+            if (use_https) {
+                r = proxy_tls_read(tls_conn, response_buf + offset + total_body, sizeof(response_buf) - offset - total_body);
+            } else {
+                r = recv(backend_fd, response_buf + offset + total_body, sizeof(response_buf) - offset - total_body, 0);
+            }
+            if (r > 0) {
+                total_body += (size_t)r;
+            } else if (r == 0) {
+                break;
+            } else {
+                if (errno == EAGAIN || errno == EINTR) continue;
+                break;
+            }
+        }
+        body_len = total_body;
+    }
+
+    /* 判断后端是否发送 Connection: close */
+    bool backend_wants_close = false;
+    {
+        const char *p = headers;
+        while (*p) {
+            if (strncasecmp(p, "connection:", 11) == 0) {
+                p += 11;
+                while (*p == ' ' || *p == '\t') p++;
+                if (strncasecmp(p, "close", 5) == 0) {
+                    backend_wants_close = true;
+                }
+                break;
+            }
+            const char *nl = strstr(p, "\r\n");
+            if (!nl) break;
+            p = nl + 2;
+        }
+    }
+
+    /* 归还或关闭连接 */
+    if (backend_wants_close) {
+        if (use_https && tls_conn) {
+            proxy_tls_close(tls_conn);
+        } else if (backend_fd != COCOON_INVALID_SOCKET) {
+            cocoon_socket_close(backend_fd);
+        }
+    } else {
+        proxy_pool_release(backend, backend_fd, tls_conn);
+    }
+
+    /* 构建 HTTP/2 响应 */
+    nghttp2_nv hdrs[32];
+    int num_hdrs = 0;
+
+    char status_str[4];
+    snprintf(status_str, sizeof(status_str), "%d", status);
+    hdrs[num_hdrs++] = (nghttp2_nv){
+        (uint8_t *)":status", (uint8_t *)status_str, 7, strlen(status_str), 0};
+
+    /* 解析 HTTP/1.1 头为 nghttp2_nv */
+    const char *p = headers;
+    while (*p && num_hdrs < 32) {
+        const char *nl = strstr(p, "\r\n");
+        if (!nl) break;
+        size_t line_len = (size_t)(nl - p);
+        if (line_len == 0) break;
+
+        const char *colon = memchr(p, ':', line_len);
+        if (!colon) {
+            p = nl + 2;
+            continue;
+        }
+
+        size_t name_len = (size_t)(colon - p);
+        size_t value_len = line_len - name_len - 1;
+        const char *value = colon + 1;
+        while (value_len > 0 && (*value == ' ' || *value == '\t')) {
+            value++;
+            value_len--;
+        }
+
+        /* 过滤 hop-by-hop 头 */
+        char name_lower[64];
+        size_t copy_len = name_len < sizeof(name_lower) - 1 ? name_len : sizeof(name_lower) - 1;
+        memcpy(name_lower, p, copy_len);
+        name_lower[copy_len] = '\0';
+        for (size_t i = 0; i < copy_len; i++) {
+            if (name_lower[i] >= 'A' && name_lower[i] <= 'Z') {
+                name_lower[i] += 'a' - 'A';
+            }
+        }
+
+        if (is_hop_by_hop_header(name_lower)) {
+            p = nl + 2;
+            continue;
+        }
+
+        /* 跳过 content-length（由 body 决定） */
+        if (strcmp(name_lower, "content-length") == 0) {
+            p = nl + 2;
+            continue;
+        }
+
+        /* 创建 nghttp2_nv（nghttp2 不会修改这些内存，但要求非 const） */
+        hdrs[num_hdrs].name = (uint8_t *)p;  /* 指向 response_buf 内部，生命周期足够 */
+        hdrs[num_hdrs].value = (uint8_t *)value;
+        hdrs[num_hdrs].namelen = name_len;
+        hdrs[num_hdrs].valuelen = value_len;
+        hdrs[num_hdrs].flags = 0;
+        num_hdrs++;
+        p = nl + 2;
+    }
+
+    /* 存储 body 到流 */
+    if (body_len > 0) {
+        stream->response_body = (char *)malloc(body_len);
+        if (stream->response_body) {
+            memcpy(stream->response_body, body, body_len);
+            stream->response_len = body_len;
+            stream->response_sent = 0;
+        }
+    }
+
+    if (stream->response_body && stream->response_len > 0) {
+        nghttp2_data_provider provider;
+        provider.source.ptr = stream;
+        provider.read_callback = http2_data_source_read_callback;
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, num_hdrs, &provider);
+    } else {
+        nghttp2_submit_response(h2->session, stream->stream_id, hdrs, num_hdrs, NULL);
+    }
 }
 
 /**

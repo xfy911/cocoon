@@ -773,6 +773,9 @@ static void handle_http2(connection_t *conn) {
     http2_session_t *h2 = http2_session_get(conn->fd);
     if (!h2) return;
     http2_session_set_context(h2, conn->root_dir, conn->gzip_enabled, conn->brotli_enabled);
+    if (conn->ctx && conn->ctx->proxy_config.count > 0) {
+        http2_session_set_proxy_config(h2, &conn->ctx->proxy_config, &conn->client_addr);
+    }
 
     uint32_t timeout_ms = conn->timeout_ms > 0 ? conn->timeout_ms : CONN_TIMEOUT_MS;
 

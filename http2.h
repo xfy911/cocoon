@@ -11,6 +11,7 @@
 #define COCOON_HTTP2_H
 
 #include "cocoon.h"
+#include "proxy.h"
 #include "http.h"
 #include <nghttp2/nghttp2.h>
 #include <stdbool.h>
@@ -33,6 +34,8 @@ typedef struct {
     const char *root_dir;          /**< 静态资源根目录 */
     bool gzip_enabled;             /**< 是否启用 gzip 压缩 */
     bool brotli_enabled;           /**< 是否启用 brotli 压缩 */
+    cocoon_proxy_config_t *proxy_config; /**< 反向代理配置 */
+    struct sockaddr_storage *client_addr;     /**< 客户端地址 */
 } http2_session_t;
 
 /**
@@ -160,6 +163,16 @@ int http2_on_connection_accepted(int fd, bool tls_mode);
 int http2_session_upgrade(http2_session_t *h2, const http_request_t *req);
 
 /**
+ *
+ * @param proxy_config    反向代理配置（NULL 表示不启用）
+ * @param client_addr     客户端地址（NULL 表示不启用）
+ */
+void http2_session_set_proxy_config(http2_session_t *h2, cocoon_proxy_config_t *proxy_config, struct sockaddr_storage *client_addr);
+
+/**
+ * http2_session_set_context - 设置会话的服务上下文
+ *
+ * 传入 root_dir 和压缩配置，供后续静态文件服务使用。
  *
  * @param h2              会话对象
  * @param root_dir        静态资源根目录

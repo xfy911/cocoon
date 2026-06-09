@@ -1017,6 +1017,73 @@ kill -9 $BACKEND_PID 2>/dev/null || true
 kill_server
 sleep 1
 
+# === HTTP/2 反向代理测试 ===
+echo ""
+echo "=== HTTP/2 反向代理测试 ==="
+
+# 重新启动后端服务器
+python3 -m http.server 9000 --directory "$ROOT" > "$TMPDIR/backend_h2.log" 2>&1 &
+BACKEND_H2_PID=$!
+sleep 1
+
+# 创建带代理配置的 TLS 配置文件
+H2_PROXY_CONFIG="$TMPDIR/h2_proxy_config.json"
+cat > "$H2_PROXY_CONFIG" << 'EOF'
+{
+    "root_dir": "./tests/fixtures",
+    "port": 9999,
+    "log_level": "debug",
+    "proxies": [
+        {"prefix": "/backend", "target": "http://localhost:9000", "pool_size": 2}
+    ]
+}
+EOF
+
+$SERVER -c "$H2_PROXY_CONFIG" --cert tests/server.crt --key tests/server.key > "$TMPDIR/server_h2_proxy.log" 2>&1 &
+for i in {1..30}; do
+    if nc -z localhost 9999 2>/dev/null; then break; fi
+    sleep 0.1
+done
+
+# 等待 TLS 服务器就绪
+for i in {1..50}; do
+    if curl -s -o /dev/null -k --max-time 2 "https://$HOST/" 2>/dev/null; then break; fi
+    sleep 0.2
+done
+
+h2_proxy_status=$(curl --http2 -k -s -o /dev/null -w "%{http_code}" "https://$HOST/backend/index.html")
+if [[ "$h2_proxy_status" == "200" ]]; then
+    echo "  ✓ HTTP/2 反向代理 GET — HTTP 200"
+    pass
+else
+    echo "  ✗ HTTP/2 反向代理 GET — 期望 200, 实际 $h2_proxy_status"
+    fail
+fi
+
+h2_proxy_body=$(curl --http2 -k -s "https://$HOST/backend/index.html")
+if echo "$h2_proxy_body" | grep -q "Cocoon"; then
+    echo "  ✓ HTTP/2 反向代理响应体 — 包含后端内容"
+    pass
+else
+    echo "  ✗ HTTP/2 反向代理响应体 — 未包含后端内容"
+    fail
+fi
+
+# 非代理路径仍走 HTTP/2 静态文件
+h2_static_status=$(curl --http2 -k -s -o /dev/null -w "%{http_code}" "https://$HOST/index.html")
+if [[ "$h2_static_status" == "200" ]]; then
+    echo "  ✓ HTTP/2 非代理路径 — 静态文件正常 HTTP 200"
+    pass
+else
+    echo "  ✗ HTTP/2 非代理路径 — 期望 200, 实际 $h2_static_status"
+    fail
+fi
+
+# 清理 HTTP/2 后端服务器
+kill -9 $BACKEND_H2_PID 2>/dev/null || true
+kill_server
+sleep 1
+
 # === 加权轮询反向代理测试 ===
 echo ""
 echo "=== 加权轮询反向代理测试 ==="

@@ -108,6 +108,10 @@ $(UNIT_TEST_DIR)/test_websocket: $(UNIT_TEST_DIR)/test_websocket.c websocket.c l
 $(UNIT_TEST_DIR)/test_log: $(UNIT_TEST_DIR)/test_log.c log.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_log.c log.c $(UNITY_SRC) -lm
 
+# 单元测试编译规则
+$(UNIT_TEST_DIR)/test_healthcheck: $(UNIT_TEST_DIR)/test_healthcheck.c proxy.c proxy_tls.c http.c log.c platform.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_healthcheck.c proxy.c proxy_tls.c http.c log.c platform.c $(UNITY_SRC) $(LDFLAGS)
+
 $(UNIT_TEST_DIR)/test_config: $(UNIT_TEST_DIR)/test_config.c config.c log.c access_log.c http.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_config.c config.c log.c access_log.c http.c $(UNITY_SRC) -lm
 

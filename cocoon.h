@@ -39,6 +39,17 @@ typedef struct {
  * 命令行参数解析后的配置。
  */#define COCOON_MAX_PLUGINS 8   /**< 最大插件数量 */
 #define COCOON_MAX_PROXY_RULES 8 /**< 最大代理规则数量 */
+#define COCOON_MAX_VHOSTS 8      /**< 最大虚拟主机数量 */
+
+/**
+ * cocoon_vhost_t - 虚拟主机配置
+ *
+ * 根据请求的 Host 头匹配不同的根目录，实现多站点托管。
+ */
+typedef struct {
+    char server_name[256];      /**< 域名匹配（如 "example.com" 或 "*.example.com"） */
+    char root_dir[512];         /**< 该虚拟主机的静态资源根目录 */
+} cocoon_vhost_t;
 
 typedef struct cocoon_config {
     const char *root_dir;       /**< 静态资源根目录 */
@@ -72,6 +83,9 @@ typedef struct cocoon_config {
         cocoon_healthcheck_config_t healthcheck;
     } proxies[COCOON_MAX_PROXY_RULES];
     size_t num_proxies;
+    /* 虚拟主机 */
+    cocoon_vhost_t vhosts[COCOON_MAX_VHOSTS];
+    size_t num_vhosts;
 } cocoon_config_t;
 
 /* === 服务器生命周期 API === */

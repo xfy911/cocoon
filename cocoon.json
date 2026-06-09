@@ -10,6 +10,10 @@
     "brotli_enabled": true,
     "plugins": ["plugins/hello.so"],
     "access_log": "-",
+    "vhosts": [
+        {"server_name": "site-a.local", "root_dir": "./examples/www_a"},
+        {"server_name": "site-b.local", "root_dir": "./examples/www_b"}
+    ],
     "proxies": [
         {"prefix": "/api", "target": "http://localhost:3000", "pool_size": 8, "weight": 3},
         {"prefix": "/api", "target": "http://localhost:3001", "weight": 1},

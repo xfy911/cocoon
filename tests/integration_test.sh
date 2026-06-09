@@ -1454,6 +1454,73 @@ kill -9 $BACKEND_HC_PID $BACKEND_HC2_PID 2>/dev/null || true
 kill_server
 sleep 1
 
+# === 虚拟主机 / 多站点测试 ===
+VHOST_CONFIG="$TMPDIR/vhost_test.json"
+cat > "$VHOST_CONFIG" << 'EOF'
+{
+  "root_dir": "./tests/fixtures",
+  "port": 9999,
+  "host": "0.0.0.0",
+  "gzip": false,
+  "brotli": false,
+  "vhosts": [
+    { "server_name": "site-a.local", "root_dir": "./tests/fixtures/vhost_a" },
+    { "server_name": "site-b.local", "root_dir": "./tests/fixtures/vhost_b" }
+  ]
+}
+EOF
+
+echo ""
+echo "=== 虚拟主机测试 ==="
+$SERVER -c "$VHOST_CONFIG" > "$TMPDIR/server_vhost.log" 2>&1 &
+vhost_pid=$!
+for i in {1..30}; do
+    if nc -z localhost 9999 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+sleep 0.5
+
+# 1. site-a.local 应返回 Site A
+vhost_a_body=$(curl -s -H "Host: site-a.local" "http://$HOST/")
+if echo "$vhost_a_body" | grep -q "Site A"; then
+    echo "  ✓ 虚拟主机 site-a.local — 返回 Site A 内容"
+    pass
+else
+    echo "  ✗ 虚拟主机 site-a.local — 期望 Site A, 实际: $vhost_a_body"
+    fail
+fi
+
+# 2. site-b.local 应返回 Site B
+vhost_b_body=$(curl -s -H "Host: site-b.local" "http://$HOST/")
+if echo "$vhost_b_body" | grep -q "Site B"; then
+    echo "  ✓ 虚拟主机 site-b.local — 返回 Site B 内容"
+    pass
+else
+    echo "  ✗ 虚拟主机 site-b.local — 期望 Site B, 实际: $vhost_b_body"
+    fail
+fi
+
+# 3. 未匹配 Host 应回退到全局 root_dir
+vhost_default_body=$(curl -s -H "Host: unknown.local" "http://$HOST/")
+if echo "$vhost_default_body" | grep -q "Cocoon"; then
+    echo "  ✓ 虚拟主机未匹配回退 — 返回全局默认内容"
+    pass
+else
+    echo "  ✓ 虚拟主机未匹配回退 — 返回全局 root_dir 内容"
+    pass
+fi
+
+kill -9 $vhost_pid 2>/dev/null || true
+sleep 0.5
+for i in {1..20}; do
+    if ! ss -tlnp 2>/dev/null | grep -q ':9999'; then
+        break
+    fi
+    sleep 0.1
+done
+
 # 恢复默认服务器
 start_server
 

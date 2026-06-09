@@ -337,6 +337,28 @@ void http2_session_set_proxy_config(http2_session_t *h2, cocoon_proxy_config_t *
     h2->client_addr = client_addr;
 }
 
+void http2_session_set_server_config(http2_session_t *h2, cocoon_config_t *server_config) {
+    if (!h2) return;
+    h2->server_config = server_config;
+}
+
+/**
+ * vhost_match_root_dir - 根据 Host 头匹配虚拟主机根目录
+ *
+ * @param config 服务器配置
+ * @param host   Host 头值
+ * @return 匹配的 root_dir，未匹配则返回全局 root_dir
+ */
+static const char *vhost_match_root_dir(const cocoon_config_t *config, const char *host) {
+    if (!host || !config) return config ? config->root_dir : NULL;
+    for (size_t i = 0; i < config->num_vhosts; i++) {
+        if (strcmp(config->vhosts[i].server_name, host) == 0) {
+            return config->vhosts[i].root_dir;
+        }
+    }
+    return config->root_dir;
+}
+
 /**
  * http2_session_upgrade - 将 HTTP/1.1 连接升级为 HTTP/2
  *
@@ -587,7 +609,16 @@ static int on_header_callback(nghttp2_session *session,
     } else if (namelen == 7 && memcmp(":scheme", name, 7) == 0) {
         /* 忽略 scheme */
     } else if (namelen == 10 && memcmp(":authority", name, 10) == 0) {
-        /* 忽略 authority，host 可以从 path 推断 */
+        /* 存储 :authority 作为 Host 头，供虚拟主机匹配使用 */
+        if (stream->request.num_headers < HTTP_MAX_HEADERS) {
+            int idx = stream->request.num_headers;
+            memcpy(stream->request.headers[idx].name, "Host", 5);
+            size_t vlen = valuelen < sizeof(stream->request.headers[idx].value) - 1
+                ? valuelen : sizeof(stream->request.headers[idx].value) - 1;
+            memcpy(stream->request.headers[idx].value, value, vlen);
+            stream->request.headers[idx].value[vlen] = '\0';
+            stream->request.num_headers++;
+        }
     } else {
         /* 普通头字段 */
         if (stream->request.num_headers < HTTP_MAX_HEADERS) {
@@ -1045,6 +1076,19 @@ static bool http2_serve_directory(http2_session_t *h2, http2_stream_data_t *stre
  * @param stream 流数据（含请求信息）
  */
 static void http2_serve_post(http2_session_t *h2, http2_stream_data_t *stream) {
+    /* 虚拟主机匹配：根据 Host 头选择 root_dir */
+    const char *host = NULL;
+    for (int i = 0; i < stream->request.num_headers; i++) {
+        if (strcasecmp(stream->request.headers[i].name, "Host") == 0) {
+            host = stream->request.headers[i].value;
+            break;
+        }
+    }
+    const char *root_dir = h2->root_dir;
+    if (h2->server_config && host) {
+        root_dir = vhost_match_root_dir(h2->server_config, host);
+    }
+
     char response[4096];
     int n = 0;
 
@@ -1075,7 +1119,7 @@ static void http2_serve_post(http2_session_t *h2, http2_stream_data_t *stream) {
         for (int i = 0; i < num_parts; i++) {
             if (parts[i].filename && parts[i].filename[0] && parts[i].data_len > 0) {
                 char upload_dir[4096];
-                int r = snprintf(upload_dir, sizeof(upload_dir), "%s/uploads", h2->root_dir);
+                int r = snprintf(upload_dir, sizeof(upload_dir), "%s/uploads", root_dir);
                 if (r > 0 && r < (int)sizeof(upload_dir)) {
                     cocoon_mkdir(upload_dir);
                     char file_path[4096];
@@ -1713,7 +1757,20 @@ static void http2_serve_proxy(http2_session_t *h2, http2_stream_data_t *stream) 
  * @param stream 流数据（含请求信息）
  */
 static void http2_serve_static(http2_session_t *h2, http2_stream_data_t *stream) {
-    if (!h2->root_dir) {
+    /* 虚拟主机匹配：根据 Host 头选择 root_dir */
+    const char *host = NULL;
+    for (int i = 0; i < stream->request.num_headers; i++) {
+        if (strcasecmp(stream->request.headers[i].name, "Host") == 0) {
+            host = stream->request.headers[i].value;
+            break;
+        }
+    }
+    const char *root_dir = h2->root_dir;
+    if (h2->server_config && host) {
+        root_dir = vhost_match_root_dir(h2->server_config, host);
+    }
+
+    if (!root_dir) {
         nghttp2_nv hdrs[] = {
             {(uint8_t *)":status", (uint8_t *)"503", 7, 3, 0}};
         nghttp2_submit_response(h2->session, stream->stream_id, hdrs, 1, NULL);
@@ -1724,8 +1781,8 @@ static void http2_serve_static(http2_session_t *h2, http2_stream_data_t *stream)
     char real_path[4096];
     char root_normalized[4096];
     
-    if (!realpath(h2->root_dir, root_normalized)) {
-        snprintf(root_normalized, sizeof(root_normalized), "%s", h2->root_dir);
+    if (!realpath(root_dir, root_normalized)) {
+        snprintf(root_normalized, sizeof(root_normalized), "%s", root_dir);
     }
     
     int n = snprintf(real_path, sizeof(real_path), "%s%s", root_normalized, stream->request.path);

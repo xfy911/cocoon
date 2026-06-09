@@ -507,6 +507,65 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
             } else {
                 fprintf(stderr, "[Config] 第 %d 行: proxies 期望数组\n", val.line);
             }
+        } else if (strcmp(key_str, "vhosts") == 0) {
+            if (val.type == TOKEN_LBRACKET) {
+                /* 解析虚拟主机数组 */
+                while (1) {
+                    token_t item = parser_next_token(&p);
+                    if (item.type == TOKEN_RBRACKET) break;
+                    if (item.type == TOKEN_LBRACE) {
+                        char server_name[256] = {0};
+                        char root_dir[512] = {0};
+                        /* 解析对象内的键值对 */
+                        while (1) {
+                            token_t vkey = parser_next_token(&p);
+                            if (vkey.type == TOKEN_RBRACE) break;
+                            if (vkey.type != TOKEN_STRING) {
+                                fprintf(stderr, "[Config] 第 %d 行: vhost 对象期望字符串键\n", vkey.line);
+                                break;
+                            }
+                            if (!token_expect(&p, TOKEN_COLON)) break;
+                            token_t vval = parser_next_token(&p);
+                            char *vk = token_str_dup(&vkey);
+                            if (strcmp(vk, "server_name") == 0 && vval.type == TOKEN_STRING) {
+                                char *v = token_str_dup(&vval);
+                                if (v) { strncpy(server_name, v, sizeof(server_name)-1); free(v); }
+                            } else if (strcmp(vk, "root_dir") == 0 && vval.type == TOKEN_STRING) {
+                                char *v = token_str_dup(&vval);
+                                if (v) { strncpy(root_dir, v, sizeof(root_dir)-1); free(v); }
+                            }
+                            free(vk);
+                            token_t vsep = parser_next_token(&p);
+                            if (vsep.type == TOKEN_RBRACE) break;
+                            if (vsep.type != TOKEN_COMMA) {
+                                fprintf(stderr, "[Config] 第 %d 行: vhost 对象期望 ',' 或 '}'\n", vsep.line);
+                                break;
+                            }
+                        }
+                        if (server_name[0] && root_dir[0] && config->num_vhosts < COCOON_MAX_VHOSTS) {
+                            size_t sn_len = strlen(server_name);
+                            if (sn_len >= sizeof(config->vhosts[0].server_name)) sn_len = sizeof(config->vhosts[0].server_name) - 1;
+                            memcpy(config->vhosts[config->num_vhosts].server_name, server_name, sn_len);
+                            config->vhosts[config->num_vhosts].server_name[sn_len] = '\0';
+                            size_t rd_len = strlen(root_dir);
+                            if (rd_len >= sizeof(config->vhosts[0].root_dir)) rd_len = sizeof(config->vhosts[0].root_dir) - 1;
+                            memcpy(config->vhosts[config->num_vhosts].root_dir, root_dir, rd_len);
+                            config->vhosts[config->num_vhosts].root_dir[rd_len] = '\0';
+                            config->num_vhosts++;
+                        }
+                    } else {
+                        fprintf(stderr, "[Config] 第 %d 行: vhosts 数组期望对象项\n", item.line);
+                    }
+                    token_t sep = parser_next_token(&p);
+                    if (sep.type == TOKEN_RBRACKET) break;
+                    if (sep.type != TOKEN_COMMA) {
+                        fprintf(stderr, "[Config] 第 %d 行: vhosts 数组期望 ',' 或 ']'\n", sep.line);
+                        break;
+                    }
+                }
+            } else {
+                fprintf(stderr, "[Config] 第 %d 行: vhosts 期望数组\n", val.line);
+            }
         } /* 其他字段：忽略（未来扩展预留） */
 
         free(key_str);

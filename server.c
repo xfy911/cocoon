@@ -368,6 +368,38 @@ static bool handle_post_request(int fd, const http_request_t *req, const char *r
 }
 
 /**
+ * vhost_match_root_dir - 根据 Host 头匹配虚拟主机根目录
+ *
+ * @param config 服务器配置
+ * @param host   Host 头值
+ * @return 匹配的 root_dir，未匹配则返回全局 root_dir
+ */
+static const char *vhost_match_root_dir(const cocoon_config_t *config, const char *host) {
+    if (!host || !config) return config ? config->root_dir : NULL;
+    for (size_t i = 0; i < config->num_vhosts; i++) {
+        if (strcmp(config->vhosts[i].server_name, host) == 0) {
+            return config->vhosts[i].root_dir;
+        }
+    }
+    return config->root_dir;
+}
+
+/**
+ * conn_get_host - 从请求中提取 Host 头
+ *
+ * @param req HTTP 请求
+ * @return Host 头值，未找到返回 NULL
+ */
+static const char *conn_get_host(const http_request_t *req) {
+    for (int i = 0; i < req->num_headers; i++) {
+        if (strcasecmp(req->headers[i].name, "Host") == 0) {
+            return req->headers[i].value;
+        }
+    }
+    return NULL;
+}
+
+/**
  * handle_request - 处理单个 HTTP 请求
  *
  * 从缓冲区解析请求，判断是文件还是目录，调用对应的服务函数。
@@ -402,6 +434,13 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     }
     conn->buf_len -= (size_t)parsed;
 
+    /* 虚拟主机匹配：根据 Host 头选择 root_dir */
+    const char *effective_root_dir = root_dir;
+    if (conn->ctx) {
+        const char *host = conn_get_host(&req);
+        effective_root_dir = vhost_match_root_dir(&conn->ctx->config, host);
+    }
+
     /* 执行中间件链 */
     if (cocoon_middleware_run(&req, conn->fd) != 0) {
         /* 某个中间件已短路请求，清理并返回 */
@@ -428,7 +467,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
 
     /* 处理 POST */
     if (req.method == HTTP_POST) {
-        bool keep = handle_post_request(conn->fd, &req, conn->root_dir);
+        bool keep = handle_post_request(conn->fd, &req, effective_root_dir);
         conn->response_status = 200; /* POST 目前总是返回 200 */
         update_metrics(conn->response_status);
         access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
@@ -612,8 +651,8 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     /* 安全路径拼接 */
     char real_path[4096];
     char root_normalized[4096];
-    if (!cocoon_realpath(root_dir, root_normalized, sizeof(root_normalized))) {
-        strncpy(root_normalized, root_dir, sizeof(root_normalized) - 1);
+    if (!cocoon_realpath(effective_root_dir, root_normalized, sizeof(root_normalized))) {
+        strncpy(root_normalized, effective_root_dir, sizeof(root_normalized) - 1);
         root_normalized[sizeof(root_normalized) - 1] = '\0';
     }
 
@@ -682,16 +721,16 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
                 return req.keep_alive;
             }
             conn->response_status = 200;
-            static_serve_file(conn->fd, &index_req, root_dir, conn->gzip_enabled, conn->brotli_enabled);
+            static_serve_file(conn->fd, &index_req, effective_root_dir, conn->gzip_enabled, conn->brotli_enabled);
         } else {
             /* 无 index.html，生成目录列表 */
             conn->response_status = 200;
-            static_serve_directory(conn->fd, &req, root_dir, real_path);
+            static_serve_directory(conn->fd, &req, effective_root_dir, real_path);
         }
     } else if (cocoon_stat_isreg(&st)) {
         /* 普通文件 */
         conn->response_status = 200;
-        static_serve_file(conn->fd, &req, root_dir, conn->gzip_enabled, conn->brotli_enabled);
+        static_serve_file(conn->fd, &req, effective_root_dir, conn->gzip_enabled, conn->brotli_enabled);
     } else {
         conn->response_status = 403;
         static_send_error(conn->fd, 403, req.keep_alive);
@@ -775,6 +814,7 @@ static void handle_http2(connection_t *conn) {
     http2_session_t *h2 = http2_session_get(conn->fd);
     if (!h2) return;
     http2_session_set_context(h2, conn->root_dir, conn->gzip_enabled, conn->brotli_enabled);
+    http2_session_set_server_config(h2, &conn->ctx->config);
     if (conn->ctx && conn->ctx->proxy_config.count > 0) {
         http2_session_set_proxy_config(h2, &conn->ctx->proxy_config, &conn->client_addr);
     }
@@ -951,6 +991,7 @@ static void client_handler(void *arg) {
                 http2_session_set_context(h2, conn->root_dir,
                                           conn->gzip_enabled,
                                           conn->brotli_enabled);
+                http2_session_set_server_config(h2, &conn->ctx->config);
                 if (http2_send_pending(h2) == 0) {
                     if (http2_recv(h2, (const uint8_t *)conn->buf, conn->buf_len) == 0) {
                         conn->buf_len = 0;
@@ -979,6 +1020,7 @@ static void client_handler(void *arg) {
                     http2_session_set_context(h2, conn->root_dir,
                                               conn->gzip_enabled,
                                               conn->brotli_enabled);
+                http2_session_set_server_config(h2, &conn->ctx->config);
                     if (http2_send_pending(h2) == 0) {
                         if (http2_session_upgrade(h2, &req) == 0) {
                             if (http2_send_pending(h2) == 0) {
@@ -1139,6 +1181,7 @@ static void accept_loop(void *arg) {
                     http2_session_set_context(h2, ctx->config.root_dir,
                                               ctx->config.gzip_enabled,
                                               ctx->config.brotli_enabled);
+                    http2_session_set_server_config(h2, &ctx->config);
                 }
             }
         }

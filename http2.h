@@ -36,6 +36,7 @@ typedef struct {
     bool brotli_enabled;           /**< 是否启用 brotli 压缩 */
     cocoon_proxy_config_t *proxy_config; /**< 反向代理配置 */
     struct sockaddr_storage *client_addr;     /**< 客户端地址 */
+    cocoon_config_t *server_config;          /**< 服务器配置（用于虚拟主机匹配） */
 } http2_session_t;
 
 /**
@@ -180,6 +181,16 @@ void http2_session_set_proxy_config(http2_session_t *h2, cocoon_proxy_config_t *
  * @param brotli_enabled  是否启用 brotli
  */
 void http2_session_set_context(http2_session_t *h2, const char *root_dir, bool gzip_enabled, bool brotli_enabled);
+
+/**
+ * http2_session_set_server_config - 设置服务器配置指针
+ *
+ * 用于虚拟主机匹配。
+ *
+ * @param h2              会话对象
+ * @param server_config   服务器配置指针
+ */
+void http2_session_set_server_config(http2_session_t *h2, cocoon_config_t *server_config);
 
 #ifdef __cplusplus
 }

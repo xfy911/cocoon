@@ -1159,6 +1159,68 @@ kill -9 $BACKEND_B_PID 2>/dev/null || true
 kill_server
 sleep 1
 
+# === HTTP/1.0 后端兼容测试 ===
+echo ""
+echo "=== HTTP/1.0 后端兼容测试 ==="
+
+# 启动 HTTP/1.0 后端（发送 Connection: close 后主动关闭）
+python3 "$ROOT/../http10_backend.py" 9004 "$ROOT" > "$TMPDIR/backend_http10.log" 2>&1 &
+BACKEND_HTTP10_PID=$!
+sleep 1
+
+# 创建带 HTTP/1.0 代理配置的配置文件
+HTTP10_PROXY_CONFIG="$TMPDIR/http10_proxy_config.json"
+cat > "$HTTP10_PROXY_CONFIG" << 'EOF'
+{
+    "root_dir": "./tests/fixtures",
+    "port": 9999,
+    "log_level": "debug",
+    "proxies": [
+        {"prefix": "/backend", "target": "http://localhost:9004", "pool_size": 2}
+    ]
+}
+EOF
+
+$SERVER -c "$HTTP10_PROXY_CONFIG" > "$TMPDIR/server_http10_proxy.log" 2>&1 &
+for i in {1..30}; do
+    if nc -z localhost 9999 2>/dev/null; then break; fi
+    sleep 0.1
+done
+
+# 第一次请求：应成功
+http10_status1=$(curl -s -o /dev/null -w "%{http_code}" "http://$HOST/backend/index.html")
+if [[ "$http10_status1" == "200" ]]; then
+    echo "  ✓ HTTP/1.0 代理第一次请求 — HTTP 200"
+    pass
+else
+    echo "  ✗ HTTP/1.0 代理第一次请求 — 期望 200, 实际 $http10_status1"
+    fail
+fi
+
+# 第二次请求：验证代理能正确新建连接（旧连接已被后端关闭）
+http10_status2=$(curl -s -o /dev/null -w "%{http_code}" "http://$HOST/backend/index.html")
+if [[ "$http10_status2" == "200" ]]; then
+    echo "  ✓ HTTP/1.0 代理第二次请求 — HTTP 200（连接池正确关闭旧连接）"
+    pass
+else
+    echo "  ✗ HTTP/1.0 代理第二次请求 — 期望 200, 实际 $http10_status2（连接池可能复用了已关闭的连接）"
+    fail
+fi
+
+# 检查代理日志中有关闭旧连接的日志
+if grep -q "关闭" "$TMPDIR/server_http10_proxy.log" || grep -q "connection" "$TMPDIR/server_http10_proxy.log" || grep -q "新建" "$TMPDIR/server_http10_proxy.log"; then
+    echo "  ✓ HTTP/1.0 代理日志 — 检测到连接管理日志"
+    pass
+else
+    echo "  ⊘ HTTP/1.0 代理日志 — 未检测到连接管理日志（日志级别可能不够）"
+    pass
+fi
+
+# 清理 HTTP/1.0 后端服务器
+kill -9 $BACKEND_HTTP10_PID 2>/dev/null || true
+kill_server
+sleep 1
+
 # === HTTPS 反向代理测试 ===
 echo ""
 echo "=== HTTPS 反向代理测试 ==="

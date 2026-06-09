@@ -1584,6 +1584,7 @@ static void http2_serve_proxy(http2_session_t *h2, http2_stream_data_t *stream) 
 
     /* 判断后端是否发送 Connection: close */
     bool backend_wants_close = false;
+    bool is_http10 = strncmp(response_buf, "HTTP/1.0", 8) == 0;
     {
         const char *p = headers;
         while (*p) {
@@ -1592,6 +1593,8 @@ static void http2_serve_proxy(http2_session_t *h2, http2_stream_data_t *stream) 
                 while (*p == ' ' || *p == '\t') p++;
                 if (strncasecmp(p, "close", 5) == 0) {
                     backend_wants_close = true;
+                } else if (strncasecmp(p, "keep-alive", 10) == 0) {
+                    backend_wants_close = false;  /* 显式 keep-alive */
                 }
                 break;
             }
@@ -1599,6 +1602,10 @@ static void http2_serve_proxy(http2_session_t *h2, http2_stream_data_t *stream) 
             if (!nl) break;
             p = nl + 2;
         }
+    }
+    /* HTTP/1.0 默认关闭，除非显式 keep-alive */
+    if (is_http10 && !backend_wants_close) {
+        backend_wants_close = true;
     }
 
     /* 归还或关闭连接 */

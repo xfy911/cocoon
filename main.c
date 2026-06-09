@@ -103,74 +103,52 @@ static void print_usage(const char *prog) {
  */
 static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
     /* 默认值 */
-    config->root_dir = NULL;
+    memset(config, 0, sizeof(*config));
     config->port = 8080;
-    config->threaded = false;
-    config->num_workers = 0;
-    config->max_connections = 0;
-    config->timeout_ms = 0;
     config->log_level = LOG_LEVEL_INFO;
     config->gzip_enabled = true;
     config->brotli_enabled = true;
 
-    config->tls_cert = NULL;
-    config->tls_key = NULL;
-    config->tls_enabled = false;
-    config->access_log_path = NULL;
-
-    config->cors_enabled = false;
-    config->auth_user = NULL;
-    config->auth_pass = NULL;
-    config->rate_limit = 0;
-
-    config->num_plugins = 0;
-
-    bool has_root_dir = false;
-    bool has_port = false;
-    bool has_workers = false;
-    bool has_max_conn = false;
-    bool has_timeout = false;
-    bool has_log_level = false;
-    bool has_gzip_enabled = false;
-    bool has_brotli_enabled = false;
-    bool has_tls_cert = false;
-    bool has_tls_key = false;
-    bool has_tls_enabled = false;
-    bool has_access_log = false;
-    bool has_cors_enabled = false;
-    bool has_auth_user = false;
-    bool has_auth_pass = false;
-    bool has_rate_limit = false;
-    bool has_plugins = false;
+    /* 第一阶段：查找配置文件路径 */
     const char *config_file = NULL;
-
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-c") == 0) {
             if (++i >= argc) return false;
             config_file = argv[i];
+        }
+    }
+
+    /* 第二阶段：加载配置文件（如果有） */
+    if (config_file) {
+        if (!config_load_from_file(config_file, config)) {
+            fprintf(stderr, "Error: 无法加载配置文件: %s\n", config_file);
+            return false;
+        }
+    }
+
+    /* 第三阶段：解析命令行参数，覆盖配置文件 */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-c") == 0) {
+            i++; /* 已处理，跳过 */
         } else if (strcmp(argv[i], "-r") == 0) {
             if (++i >= argc) return false;
+            free((void *)config->root_dir);
             config->root_dir = strdup(argv[i]);
-            has_root_dir = true;
         } else if (strcmp(argv[i], "-p") == 0) {
             if (++i >= argc) return false;
             config->port = (uint16_t)atoi(argv[i]);
             if (config->port == 0) config->port = 8080;
-            has_port = true;
         } else if (strcmp(argv[i], "-t") == 0) {
             config->threaded = true;
         } else if (strcmp(argv[i], "-w") == 0) {
             if (++i >= argc) return false;
             config->num_workers = (uint32_t)atoi(argv[i]);
-            has_workers = true;
         } else if (strcmp(argv[i], "-m") == 0) {
             if (++i >= argc) return false;
             config->max_connections = (uint32_t)atoi(argv[i]);
-            has_max_conn = true;
         } else if (strcmp(argv[i], "-o") == 0) {
             if (++i >= argc) return false;
             config->timeout_ms = (uint32_t)atoi(argv[i]);
-            has_timeout = true;
         } else if (strcmp(argv[i], "-l") == 0) {
             if (++i >= argc) return false;
             if (strcmp(argv[i], "error") == 0) config->log_level = LOG_LEVEL_ERROR;
@@ -181,51 +159,43 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
                 fprintf(stderr, "Unknown log level: %s\n", argv[i]);
                 return false;
             }
-            has_log_level = true;
         } else if (strcmp(argv[i], "-v") == 0) {
             config->log_level = LOG_LEVEL_DEBUG;
-            has_log_level = true;
         } else if (strcmp(argv[i], "--no-gzip") == 0) {
             config->gzip_enabled = false;
-            has_gzip_enabled = true;
         } else if (strcmp(argv[i], "--no-brotli") == 0) {
             config->brotli_enabled = false;
-            has_brotli_enabled = true;
         } else if (strcmp(argv[i], "--cert") == 0) {
             if (++i >= argc) return false;
+            free((void *)config->tls_cert);
             config->tls_cert = strdup(argv[i]);
-            has_tls_cert = true;
         } else if (strcmp(argv[i], "--key") == 0) {
             if (++i >= argc) return false;
+            free((void *)config->tls_key);
             config->tls_key = strdup(argv[i]);
-            has_tls_key = true;
         } else if (strcmp(argv[i], "--tls") == 0) {
             config->tls_enabled = true;
-            has_tls_enabled = true;
         } else if (strcmp(argv[i], "--access-log") == 0) {
             if (++i >= argc) return false;
+            free((void *)config->access_log_path);
             config->access_log_path = strdup(argv[i]);
-            has_access_log = true;
         } else if (strcmp(argv[i], "--cors") == 0) {
             config->cors_enabled = true;
-            has_cors_enabled = true;
         } else if (strcmp(argv[i], "--auth-user") == 0) {
             if (++i >= argc) return false;
+            free((void *)config->auth_user);
             config->auth_user = strdup(argv[i]);
-            has_auth_user = true;
         } else if (strcmp(argv[i], "--auth-pass") == 0) {
             if (++i >= argc) return false;
+            free((void *)config->auth_pass);
             config->auth_pass = strdup(argv[i]);
-            has_auth_pass = true;
         } else if (strcmp(argv[i], "--rate-limit") == 0) {
             if (++i >= argc) return false;
             config->rate_limit = (uint32_t)atoi(argv[i]);
-            has_rate_limit = true;
         } else if (strcmp(argv[i], "--plugin") == 0) {
             if (++i >= argc) return false;
             if (config->num_plugins < COCOON_MAX_PLUGINS) {
                 config->plugins[config->num_plugins++] = strdup(argv[i]);
-                has_plugins = true;
             } else {
                 fprintf(stderr, "Error: 最多支持 %d 个插件\n", COCOON_MAX_PLUGINS);
                 return false;
@@ -237,23 +207,6 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
             return false;
         }
-    }
-
-    /* 如果有配置文件，先加载 */
-    if (config_file) {
-        if (!config_load_from_file(config_file, config)) {
-            fprintf(stderr, "Error: 无法加载配置文件: %s\n", config_file);
-            return false;
-        }
-        /* 用命令行参数覆盖配置文件 */
-        config_merge(config, config, has_root_dir, has_port, has_workers,
-                     has_max_conn, has_timeout, has_log_level,
-                     has_gzip_enabled, has_brotli_enabled,
-                     has_tls_cert, has_tls_key, has_tls_enabled,
-                     has_access_log,
-                     has_cors_enabled, has_auth_user, has_auth_pass,
-                     has_rate_limit,
-                     has_plugins);
     }
 
     if (!config->root_dir) {

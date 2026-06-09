@@ -546,6 +546,8 @@ static bool proxy_relay_backend(cocoon_socket_t client_fd, const http_request_t 
     /* 流式转发响应回客户端 */
     bool success = false;
     ssize_t total = 0;
+    bool connection_closed = false;  /* 后端是否主动关闭连接 */
+
     if (send_ok) {
         char relay_buf[8192];
         bool recv_ok = true;
@@ -562,8 +564,11 @@ static bool proxy_relay_backend(cocoon_socket_t client_fd, const http_request_t 
                 break;
             }
             if (r == 0) {
-                /* 后端关闭连接，如果尚未转发任何数据则视为失败 */
+                /* 后端关闭连接，如果尚未转发任何数据则视为失败
+                 * 否则标记 connection_closed，请求成功但连接不可复用
+                 */
                 if (total == 0) recv_ok = false;
+                connection_closed = true;
                 break;
             }
 
@@ -585,8 +590,8 @@ static bool proxy_relay_backend(cocoon_socket_t client_fd, const http_request_t 
 
     if (total_forwarded) *total_forwarded = total;
 
-    /* 归还或关闭连接：只有后端未关闭时才归还 */
-    if (success && total > 0) {
+    /* 归还或关闭连接：只有后端未主动关闭时才归还 */
+    if (success && total > 0 && !connection_closed) {
         proxy_pool_release(backend, backend_fd, tls_conn);
     } else {
         if (use_https && tls_conn) {

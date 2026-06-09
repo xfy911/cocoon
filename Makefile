@@ -115,9 +115,8 @@ $(UNIT_TEST_DIR)/test_healthcheck: $(UNIT_TEST_DIR)/test_healthcheck.c proxy.c p
 $(UNIT_TEST_DIR)/test_config: $(UNIT_TEST_DIR)/test_config.c config.c log.c access_log.c http.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_config.c config.c log.c access_log.c http.c $(UNITY_SRC) -lm
 
-# 编译规则
-%.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+$(UNIT_TEST_DIR)/test_proxy: $(UNIT_TEST_DIR)/test_proxy.c proxy_tls.c http.c log.c platform.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_proxy.c proxy_tls.c http.c log.c platform.c $(UNITY_SRC) $(LDFLAGS)
 
 # 安装
 install: $(TARGET)

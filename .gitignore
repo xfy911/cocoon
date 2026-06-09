@@ -10,6 +10,8 @@ tests/unit/test_multipart
 tests/unit/test_static
 tests/unit/test_server
 tests/unit/test_websocket
+tests/unit/test_healthcheck
+tests/unit/test_proxy
 tests/fixtures/uploads/
 plugins/*.so
 www/uploads/

@@ -30,6 +30,7 @@
 #include "middleware.h"
 #include "proxy.h"
 #include "healthcheck.h"
+#include "config.h"
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -74,6 +75,8 @@ struct server_context {
     cocoon_healthcheck_manager_t hc_manager; /**< 主动健康检查管理器 */
     volatile int        running;      /**< 运行标志 */
     coco_sched_t       *sched;        /**< 协程调度器 */
+    const char         *config_file_path; /**< 配置文件路径（用于热重载） */
+    volatile int        reload_requested; /**< 配置热重载请求标志 */
 };
 
 /* 全局活跃连接计数器（线程安全） */
@@ -1115,6 +1118,12 @@ static void accept_loop(void *arg) {
 
     while (ctx->running) {
         if (ctx->listen_fd < 0) break;
+
+        if (ctx->reload_requested) {
+            ctx->reload_requested = 0;
+            server_reload_config(ctx);
+        }
+
         struct sockaddr_storage client_addr;
         socklen_t addr_len = sizeof(client_addr);
         cocoon_socket_t client_fd = accept(ctx->listen_fd,
@@ -1126,6 +1135,12 @@ static void accept_loop(void *arg) {
             }
             log_error("accept 失败: %s", cocoon_strerror(err));
             break;
+        }
+
+        /* accept 返回后再次检查热重载请求，确保新连接使用最新配置 */
+        if (ctx->reload_requested) {
+            ctx->reload_requested = 0;
+            server_reload_config(ctx);
         }
 
         /* 检查最大连接数限制 */
@@ -1249,7 +1264,7 @@ static void accept_loop(void *arg) {
  * @param config 配置指针
  * @return 服务器上下文，失败返回 NULL
  */
-server_context_t *server_create(const cocoon_config_t *config) {
+server_context_t *server_create(const cocoon_config_t *config, const char *config_file_path) {
     if (!config || !config->root_dir) return NULL;
 
     server_context_t *ctx = (server_context_t *)calloc(1, sizeof(server_context_t));
@@ -1259,6 +1274,10 @@ server_context_t *server_create(const cocoon_config_t *config) {
     ctx->config = *config;
     ctx->config.root_dir = strdup(config->root_dir);
     ctx->running = 1;
+
+    if (config_file_path) {
+        ctx->config_file_path = strdup(config_file_path);
+    }
 
     g_max_connections = config->max_connections;
 
@@ -1399,6 +1418,137 @@ void server_stop(server_context_t *ctx) {
  *
  * @param ctx 服务器上下文
  */
+void server_request_reload(server_context_t *ctx) {
+    if (ctx) {
+        ctx->reload_requested = 1;
+    }
+}
+
+void server_reload_config(server_context_t *ctx) {
+    if (!ctx || !ctx->config_file_path) {
+        log_warn("配置热重载：未指定配置文件路径");
+        return;
+    }
+
+    log_info("配置热重载开始：%s", ctx->config_file_path);
+
+    cocoon_config_t new_config = {0};
+    new_config.port = 8080;
+    new_config.log_level = LOG_LEVEL_INFO;
+    new_config.gzip_enabled = true;
+    new_config.brotli_enabled = true;
+
+    if (!config_load_from_file(ctx->config_file_path, &new_config)) {
+        log_error("配置热重载失败：无法加载配置文件");
+        return;
+    }
+
+    /* 检查不可热重载项 */
+    if (new_config.port != ctx->config.port) {
+        log_warn("端口变化（%d -> %d）需要重启才能生效", ctx->config.port, new_config.port);
+    }
+    if (new_config.threaded != ctx->config.threaded) {
+        log_warn("线程模式变化需要重启才能生效");
+    }
+    if (new_config.num_workers != ctx->config.num_workers) {
+        log_warn("工作线程数变化（%u -> %u）需要重启才能生效", ctx->config.num_workers, new_config.num_workers);
+    }
+    if ((new_config.tls_cert && !ctx->config.tls_cert) ||
+        (!new_config.tls_cert && ctx->config.tls_cert) ||
+        (new_config.tls_cert && ctx->config.tls_cert && strcmp(new_config.tls_cert, ctx->config.tls_cert) != 0)) {
+        log_warn("TLS 证书变化需要重启才能生效");
+    }
+
+    /* 热重载：root_dir（不释放旧指针，避免竞态） */
+    if (new_config.root_dir && (!ctx->config.root_dir || strcmp(new_config.root_dir, ctx->config.root_dir) != 0)) {
+        ctx->config.root_dir = strdup(new_config.root_dir);
+        log_info("根目录已更新：%s", ctx->config.root_dir);
+    }
+
+    /* 热重载：log_level */
+    if (new_config.log_level != ctx->config.log_level) {
+        ctx->config.log_level = new_config.log_level;
+        log_set_level(new_config.log_level);
+        log_info("日志级别已更新：%d", new_config.log_level);
+    }
+
+    /* 热重载：access_log */
+    if (new_config.access_log_path) {
+        if (!ctx->config.access_log_path || strcmp(new_config.access_log_path, ctx->config.access_log_path) != 0) {
+            access_log_close();
+            access_log_init(new_config.access_log_path);
+            ctx->config.access_log_path = strdup(new_config.access_log_path);
+            log_info("访问日志路径已更新：%s", ctx->config.access_log_path);
+        }
+    } else if (ctx->config.access_log_path) {
+        access_log_close();
+        ctx->config.access_log_path = NULL;
+        log_info("访问日志已关闭");
+    }
+
+    /* 热重载：压缩 */
+    if (new_config.gzip_enabled != ctx->config.gzip_enabled) {
+        ctx->config.gzip_enabled = new_config.gzip_enabled;
+        log_info("gzip 压缩已%s", ctx->config.gzip_enabled ? "启用" : "禁用");
+    }
+    if (new_config.brotli_enabled != ctx->config.brotli_enabled) {
+        ctx->config.brotli_enabled = new_config.brotli_enabled;
+        log_info("brotli 压缩已%s", ctx->config.brotli_enabled ? "启用" : "禁用");
+    }
+
+    /* 热重载：超时和连接限制 */
+    if (new_config.timeout_ms != ctx->config.timeout_ms) {
+        ctx->config.timeout_ms = new_config.timeout_ms;
+        log_info("连接超时已更新：%u ms", ctx->config.timeout_ms);
+    }
+    if (new_config.max_connections != ctx->config.max_connections) {
+        ctx->config.max_connections = new_config.max_connections;
+        g_max_connections = new_config.max_connections;
+        log_info("最大连接数已更新：%u", ctx->config.max_connections);
+    }
+
+    /* 热重载：vhosts */
+    if (new_config.num_vhosts > 0 || ctx->config.num_vhosts > 0) {
+        if (new_config.num_vhosts != ctx->config.num_vhosts ||
+            memcmp(new_config.vhosts, ctx->config.vhosts, sizeof(new_config.vhosts)) != 0) {
+            memcpy(ctx->config.vhosts, new_config.vhosts, sizeof(new_config.vhosts));
+            ctx->config.num_vhosts = new_config.num_vhosts;
+            log_info("虚拟主机已更新：%zu 个", ctx->config.num_vhosts);
+        }
+    }
+
+    /* 热重载：proxies */
+    if (new_config.num_proxies > 0 || ctx->config.num_proxies > 0) {
+        proxy_config_destroy(&ctx->proxy_config);
+        proxy_init(&ctx->proxy_config);
+        for (size_t i = 0; i < new_config.num_proxies; i++) {
+            proxy_add_rule(&ctx->proxy_config, new_config.proxies[i].prefix, new_config.proxies[i].target, new_config.proxies[i].pool_size, new_config.proxies[i].weight, &new_config.proxies[i].healthcheck);
+        }
+        ctx->config.num_proxies = new_config.num_proxies;
+        memcpy(ctx->config.proxies, new_config.proxies, sizeof(new_config.proxies));
+        log_info("代理规则已更新：%zu 条", ctx->config.num_proxies);
+    }
+
+    /* 热重载：healthcheck */
+    healthcheck_stop(&ctx->hc_manager);
+    healthcheck_manager_init(&ctx->hc_manager);
+    healthcheck_start(&ctx->hc_manager, &ctx->proxy_config, ctx->config.timeout_ms);
+    log_info("健康检查已重新配置");
+
+    log_info("配置热重载完成");
+
+    /* 清理 new_config 分配的内存 */
+    if (new_config.root_dir) free((void*)new_config.root_dir);
+    if (new_config.tls_cert) free((void*)new_config.tls_cert);
+    if (new_config.tls_key) free((void*)new_config.tls_key);
+    if (new_config.access_log_path) free((void*)new_config.access_log_path);
+    if (new_config.auth_user) free((void*)new_config.auth_user);
+    if (new_config.auth_pass) free((void*)new_config.auth_pass);
+    for (size_t i = 0; i < new_config.num_plugins; i++) {
+        free((void*)new_config.plugins[i]);
+    }
+}
+
 void server_destroy(server_context_t *ctx) {
     if (!ctx) return;
 
@@ -1418,6 +1568,11 @@ void server_destroy(server_context_t *ctx) {
     if (ctx->listen_fd != COCOON_INVALID_SOCKET) {
         cocoon_socket_close(ctx->listen_fd);
         ctx->listen_fd = COCOON_INVALID_SOCKET;
+    }
+
+    if (ctx->config_file_path) {
+        free((void*)ctx->config_file_path);
+        ctx->config_file_path = NULL;
     }
 
     if (ctx->config.root_dir) {

@@ -56,6 +56,12 @@ static void reload_handler(int sig) {
     cocoon_plugin_reload();
 }
 
+static void sighup_handler(int sig) {
+    (void)sig;
+    printf("\n[Cocoon] 收到 SIGHUP，准备热重载配置...\n");
+    server_request_reload(g_ctx);
+}
+
 /**
  * print_usage - 打印使用说明
  *
@@ -84,8 +90,9 @@ static void print_usage(const char *prog) {
     printf("  --rate-limit <n>    每秒最大请求数（限流）\n");
     printf("  --plugin <path>  加载插件（可多次指定）\n");
     printf("\nSignals:\n");
-  printf("  SIGUSR1  热重载所有插件（无需重启服务器）\n");
-  printf("\nExample:\n");
+    printf("  SIGHUP   热重载配置文件（无需重启服务器）\n");
+    printf("  SIGUSR1  热重载所有插件（无需重启服务器）\n");
+    printf("\nExample:\n");
     printf("  %s -c cocoon.json\n", prog);
     printf("  %s -r ./www -p 8080\n", prog);
     printf("  %s -c cocoon.json -p 9090  # 命令行覆盖配置文件的端口\n", prog);
@@ -228,10 +235,19 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
  */
 int main(int argc, char *argv[]) {
     cocoon_config_t config = {0};
+    const char *config_file_path = NULL;
 
     if (!parse_args(argc, argv, &config)) {
         print_usage(argv[0]);
         return 1;
+    }
+
+    /* 从参数中查找配置文件路径 */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
+            config_file_path = argv[i + 1];
+            break;
+        }
     }
 
     /* 初始化 socket 子系统（Windows 下 WSAStartup） */
@@ -243,6 +259,7 @@ int main(int argc, char *argv[]) {
     /* 注册信号处理 */
     cocoon_signal_setup(signal_handler);
     signal(SIGUSR1, reload_handler);
+    signal(SIGHUP, sighup_handler);
     signal(SIGPIPE, SIG_IGN);  /* 忽略 SIGPIPE，防止写入已关闭的连接时进程终止 */
 
     /* 设置日志级别 */
@@ -254,7 +271,7 @@ int main(int argc, char *argv[]) {
     }
 
     /* 创建服务器 */
-    g_ctx = server_create(&config);
+    g_ctx = server_create(&config, config_file_path);
     if (!g_ctx) {
         fprintf(stderr, "[Cocoon] 创建服务器失败\n");
         return 1;

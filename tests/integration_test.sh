@@ -1524,6 +1524,94 @@ done
 # 恢复默认服务器
 start_server
 
+# === SIGHUP 配置热重载测试 ===
+echo ""
+echo "=== SIGHUP 配置热重载测试 ==="
+
+# 关闭默认服务器
+fuser -k 9999/tcp 2>/dev/null || true
+sleep 0.5
+for i in {1..20}; do
+    if ! ss -tlnp 2>/dev/null | grep -q ':9999'; then
+        break
+    fi
+    sleep 0.1
+done
+
+RELOAD_CONFIG="$TMPDIR/reload_test.json"
+cat > "$RELOAD_CONFIG" <<'EOF'
+{
+    "port": 9999,
+    "root_dir": "./tests/fixtures",
+    "log_level": "debug",
+    "gzip_enabled": true,
+    "brotli_enabled": true
+}
+EOF
+
+$SERVER -c "$RELOAD_CONFIG" > "$TMPDIR/server_reload.log" 2>&1 &
+reload_pid=$!
+sleep 1
+for i in {1..20}; do
+    if ss -tlnp 2>/dev/null | grep -q ':9999'; then
+        break
+    fi
+    sleep 0.1
+done
+
+# 1. 确认初始配置生效
+reload_before=$(curl -s "http://$HOST/")
+if echo "$reload_before" | grep -q "Cocoon"; then
+    echo "  ✓ 初始配置 — 返回 fixtures 目录内容"
+    pass
+else
+    echo "  ✗ 初始配置 — 期望 Cocoon 内容, 实际: $reload_before"
+    fail
+fi
+
+# 2. 修改配置文件（更换 root_dir）
+cat > "$RELOAD_CONFIG" <<'EOF'
+{
+    "port": 9999,
+    "root_dir": "./tests/fixtures/vhost_a",
+    "log_level": "debug",
+    "gzip_enabled": false,
+    "brotli_enabled": false
+}
+EOF
+
+# 3. 发送 SIGHUP 信号
+kill -HUP $reload_pid 2>/dev/null
+sleep 1
+
+# 4. 确认新配置生效
+reload_after=$(curl -s "http://$HOST/")
+if echo "$reload_after" | grep -q "Site A"; then
+    echo "  ✓ 热重载后 — root_dir 已更新为 vhost_a"
+    pass
+else
+    echo "  ✗ 热重载后 — 期望 Site A, 实际: $reload_after"
+    fail
+fi
+
+# 5. 检查日志中是否出现热重载完成信息
+if grep -q "配置热重载完成" "$TMPDIR/server_reload.log"; then
+    echo "  ✓ 热重载日志 — 检测到完成日志"
+    pass
+else
+    echo "  ✗ 热重载日志 — 未检测到完成日志"
+    fail
+fi
+
+kill -9 $reload_pid 2>/dev/null || true
+sleep 0.5
+for i in {1..20}; do
+    if ! ss -tlnp 2>/dev/null | grep -q ':9999'; then
+        break
+    fi
+    sleep 0.1
+done
+
 echo ""
 echo "=== 结果汇总 ==="
 echo "通过: $PASS"

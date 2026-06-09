@@ -1,0 +1,7 @@
+{
+    "port": 9999,
+    "root_dir": "./tests/fixtures",
+    "log_level": "debug",
+    "gzip_enabled": true,
+    "brotli_enabled": true
+}

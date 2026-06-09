@@ -7,19 +7,19 @@
 /* ===== server_create 参数校验 ===== */
 
 void test_create_null_config(void) {
-    TEST_ASSERT_NULL(server_create(NULL));
+    TEST_ASSERT_NULL(server_create(NULL, NULL));
 }
 
 void test_create_null_root_dir(void) {
     cocoon_config_t cfg = {.port = 8080};
     /* root_dir 为 NULL，应提前返回 NULL */
-    TEST_ASSERT_NULL(server_create(&cfg));
+    TEST_ASSERT_NULL(server_create(&cfg, NULL));
 }
 
 void test_create_empty_root_dir(void) {
     cocoon_config_t cfg = {.root_dir = "", .port = 30001};
     /* 空字符串 root_dir 应该也失败（或成功取决于实现） */
-    server_context_t *ctx = server_create(&cfg);
+    server_context_t *ctx = server_create(&cfg, NULL);
     if (ctx) {
         server_destroy(ctx);
     }
@@ -36,7 +36,7 @@ void test_create_port_zero(void) {
         .port = 0,
         .threaded = false
     };
-    server_context_t *ctx = server_create(&cfg);
+    server_context_t *ctx = server_create(&cfg, NULL);
     if (ctx) {
         server_destroy(ctx);
         TEST_ASSERT_TRUE(1);
@@ -51,7 +51,7 @@ void test_create_high_port(void) {
         .port = 65535,
         .threaded = false
     };
-    server_context_t *ctx = server_create(&cfg);
+    server_context_t *ctx = server_create(&cfg, NULL);
     if (ctx) {
         server_destroy(ctx);
         TEST_ASSERT_TRUE(1);
@@ -67,7 +67,7 @@ void test_create_multithread_config(void) {
         .threaded = true,
         .num_workers = 2
     };
-    server_context_t *ctx = server_create(&cfg);
+    server_context_t *ctx = server_create(&cfg, NULL);
     if (ctx) {
         server_destroy(ctx);
         TEST_ASSERT_TRUE(1);
@@ -84,7 +84,7 @@ void test_create_zero_workers(void) {
         .threaded = true,
         .num_workers = 0
     };
-    server_context_t *ctx = server_create(&cfg);
+    server_context_t *ctx = server_create(&cfg, NULL);
     if (ctx) {
         server_destroy(ctx);
         TEST_ASSERT_TRUE(1);
@@ -100,7 +100,7 @@ void test_create_with_timeout(void) {
         .threaded = false,
         .timeout_ms = 5000
     };
-    server_context_t *ctx = server_create(&cfg);
+    server_context_t *ctx = server_create(&cfg, NULL);
     if (ctx) {
         server_destroy(ctx);
         TEST_ASSERT_TRUE(1);
@@ -116,7 +116,7 @@ void test_create_with_max_connections(void) {
         .threaded = false,
         .max_connections = 100
     };
-    server_context_t *ctx = server_create(&cfg);
+    server_context_t *ctx = server_create(&cfg, NULL);
     if (ctx) {
         server_destroy(ctx);
         TEST_ASSERT_TRUE(1);
@@ -133,7 +133,7 @@ void test_create_with_compression_flags(void) {
         .gzip_enabled = false,
         .brotli_enabled = false
     };
-    server_context_t *ctx = server_create(&cfg);
+    server_context_t *ctx = server_create(&cfg, NULL);
     if (ctx) {
         server_destroy(ctx);
         TEST_ASSERT_TRUE(1);
@@ -162,7 +162,7 @@ void test_stop_then_destroy(void) {
         .port = 30007,
         .threaded = false
     };
-    server_context_t *ctx = server_create(&cfg);
+    server_context_t *ctx = server_create(&cfg, NULL);
     if (!ctx) {
         TEST_IGNORE_MESSAGE("server_create failed, possibly port in use");
         return;
@@ -187,7 +187,7 @@ void test_create_and_destroy(void) {
         .port = 29999,  /* 使用高位端口减少冲突 */
         .threaded = false
     };
-    server_context_t *ctx = server_create(&cfg);
+    server_context_t *ctx = server_create(&cfg, NULL);
     /* 高位端口通常可用，但测试环境可能被占用，保守处理 */
     if (ctx) {
         server_stop(ctx);
@@ -211,8 +211,8 @@ void test_create_multiple_instances(void) {
         .port = 30009,
         .threaded = false
     };
-    server_context_t *ctx1 = server_create(&cfg1);
-    server_context_t *ctx2 = server_create(&cfg2);
+    server_context_t *ctx1 = server_create(&cfg1, NULL);
+    server_context_t *ctx2 = server_create(&cfg2, NULL);
 
     if (ctx1 && ctx2) {
         server_destroy(ctx2);

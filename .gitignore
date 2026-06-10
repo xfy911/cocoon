@@ -12,6 +12,10 @@ tests/unit/test_server
 tests/unit/test_websocket
 tests/unit/test_healthcheck
 tests/unit/test_proxy
+tests/unit/test_grpc
+tests/unit/test_http3
+tests/unit/test_load_balance
+tests/unit/test_middleware_ext
 tests/fixtures/uploads/
 plugins/*.so
 www/uploads/

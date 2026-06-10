@@ -33,6 +33,10 @@ set(COCOON_SOURCES
     access_log.c
     websocket.c
     middleware.c
+    middleware_ext.c
+    load_balance.c
+    grpc.c
+    http3.c
 )
 
 # 头文件路径
@@ -139,7 +143,7 @@ if(BASH_EXECUTABLE)
 endif()
 
 # 单元测试（Unity 框架）
-set(UNIT_TESTS test_server test_http test_static test_log test_config test_multipart)
+set(UNIT_TESTS test_server test_http test_static test_log test_config test_multipart test_middleware_ext test_load_balance test_grpc test_http3)
 
 foreach(test_name ${UNIT_TESTS})
     set(test_src "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/${test_name}.c")

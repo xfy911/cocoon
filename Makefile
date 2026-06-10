@@ -20,7 +20,7 @@ PREFIX ?= /usr/local
 BINDIR = $(PREFIX)/bin
 
 # 源文件
-SRCS = main.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c platform.c middleware.c plugin.c proxy.c proxy_tls.c healthcheck.c
+SRCS = main.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c platform.c middleware.c plugin.c proxy.c proxy_tls.c healthcheck.c middleware_ext.c load_balance.c grpc.c http3.c
 OBJS = $(SRCS:.c=.o)
 TARGET = cocoon
 
@@ -117,6 +117,22 @@ $(UNIT_TEST_DIR)/test_config: $(UNIT_TEST_DIR)/test_config.c config.c log.c acce
 
 $(UNIT_TEST_DIR)/test_proxy: $(UNIT_TEST_DIR)/test_proxy.c proxy_tls.c http.c log.c platform.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_proxy.c proxy_tls.c http.c log.c platform.c $(UNITY_SRC) $(LDFLAGS)
+
+# 扩展中间件测试
+$(UNIT_TEST_DIR)/test_middleware_ext: $(UNIT_TEST_DIR)/test_middleware_ext.c middleware_ext.c http.c log.c platform.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_middleware_ext.c middleware_ext.c http.c log.c platform.c $(UNITY_SRC) $(LDFLAGS)
+
+# gRPC 测试
+$(UNIT_TEST_DIR)/test_grpc: $(UNIT_TEST_DIR)/test_grpc.c grpc.c http.c log.c platform.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_grpc.c grpc.c http.c log.c platform.c $(UNITY_SRC) -lm
+
+# 负载均衡测试
+$(UNIT_TEST_DIR)/test_load_balance: $(UNIT_TEST_DIR)/test_load_balance.c load_balance.c proxy.c proxy_tls.c http.c log.c platform.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_load_balance.c load_balance.c proxy.c proxy_tls.c http.c log.c platform.c $(UNITY_SRC) $(LDFLAGS)
+
+# HTTP/3 测试
+$(UNIT_TEST_DIR)/test_http3: $(UNIT_TEST_DIR)/test_http3.c http3.c http.c log.c platform.c tls.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_http3.c http3.c http.c log.c platform.c tls.c $(UNITY_SRC) $(LDFLAGS)
 
 # 安装
 install: $(TARGET)

@@ -32,6 +32,13 @@
 | 🏥 健康检查 | `/_health` 端点返回 JSON 服务器状态 |
 | 🔄 反向代理 | HTTP/1.1 + HTTPS 后端转发，路径前缀匹配，X-Forwarded-* 头透传 |
 | 🪟 跨平台 | Linux / macOS / Windows（MinGW/MSVC）|
+| 🔐 JWT 认证 | HS256 签名验证，Bearer Token 解析，exp 过期检查 |
+| 🛡️ Security Headers | HSTS / X-Frame-Options / CSP / X-XSS-Protection / Referrer-Policy |
+| 🆔 Request ID | 32 字符 hex 追踪 ID 生成与透传 |
+| 🚫 IP 过滤 | IPv4 / CIDR 黑名单与白名单模式，X-Forwarded-For 解析 |
+| ⚖️ 负载均衡 | 一致性哈希（MurmurHash3）、最少连接、加权响应时间（EWMA）、随机 |
+| 📡 gRPC | gRPC over HTTP/2，四种 RPC 模式（Unary/Streaming），gRPC-Web 兼容 |
+| 🌐 HTTP/3 | QUIC 传输层，HTTP/3 帧处理，QPACK 头部压缩，TLS 1.3 集成 |
 
 ## Quick Start
 
@@ -218,6 +225,10 @@ Options:
 | `platform.c` | 跨平台抽象（Linux/macOS/Windows） |
 | `proxy.c` / `proxy_tls.c` | 反向代理（HTTP/1.1 + HTTPS 后端转发） |
 | `cocoon.h` | 公共配置结构体与错误码定义 |
+| `middleware_ext.c/h` | 扩展内置中间件：JWT Auth / Security Headers / Request ID / IP 过滤 |
+| `load_balance.c/h` | 分布式负载均衡：一致性哈希 / 最少连接 / 加权响应时间 / 随机 |
+| `grpc.c/h` | gRPC over HTTP/2：消息帧编解码 / 四种 RPC 模式 / gRPC-Web 兼容 |
+| `http3.c/h` | HTTP/3 over QUIC：QUIC 传输 / 帧处理 / QPACK 压缩 / TLS 1.3 接口 |
 
 ## 核心 API 速览
 
@@ -265,6 +276,8 @@ static_send_error(fd, 404, true);
 | 平均延迟 | ~60μs | wrk, 100 连接, 4 线程 |
 | 最大并发 | 数万连接 | 单线程模式 |
 | 多线程扩展 | 线性至核数 | M:N 调度 + Work-stealing |
+| 单元测试 | 451 项全部通过 ✓ | Unity 框架 |
+| 集成测试 | 109 项全部通过 ✓ | curl + bash |
 
 > 压测环境：AMD EPYC / 4 核 / Ubuntu 22.04 / io_uring 后端
 
@@ -298,6 +311,13 @@ make bench
 - [x] 跨平台支持（Windows）
 - [x] 反向代理支持
 - [x] 虚拟主机 / 多站点
+- [x] JWT 认证中间件（HS256）
+- [x] Security Headers 中间件（HSTS / CSP / X-Frame-Options）
+- [x] Request ID 追踪中间件
+- [x] IP 黑白名单过滤中间件（CIDR 支持）
+- [x] 分布式负载均衡（一致性哈希 / 最少连接 / EWMA / 随机）
+- [x] gRPC 支持（Unary / Server / Client / Bidirectional Streaming）
+- [x] HTTP/3 over QUIC（QPACK / TLS 1.3）
 
 ## 构建与安装
 

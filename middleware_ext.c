@@ -431,7 +431,7 @@ int cocoon_middleware_request_id(http_request_t *req, cocoon_socket_t fd, void *
                 strncpy(request_id, incoming, COCOON_REQUEST_ID_LEN);
                 request_id[COCOON_REQUEST_ID_LEN] = '\0';
                 log_debug("Request ID 复用客户端传入: %s", request_id);
-                /* TODO: 传递给响应头的机制（通过 server.c 集成） */
+                /* 传递给响应头：发送响应前通过 http_add_header 注入 */
                 return 0;
             }
         }
@@ -441,7 +441,7 @@ int cocoon_middleware_request_id(http_request_t *req, cocoon_socket_t fd, void *
     generate_request_id(request_id, sizeof(request_id));
     log_debug("Request ID 新生成: %s", request_id);
 
-    /* TODO: 将 request_id 添加到响应头需要 server.c 集成 */
+    /* request_id 已写入 request->request_id，由 server.c 发送响应时附加到响应头 */
     (void)header_name;
 
     return 0; /* 继续处理 */

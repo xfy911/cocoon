@@ -41,7 +41,7 @@ static int read_all(int fd, char *buf, size_t len) {
  * test_sse_send_headers - 测试 SSE 响应头格式
  */
 void test_sse_send_headers(void) {
-    int client, server;
+    int client = 0, server = 0;
     TEST_ASSERT_EQUAL_INT(0, create_socket_pair(&client, &server));
 
     TEST_ASSERT_EQUAL_INT(0, sse_send_headers(server));
@@ -62,7 +62,7 @@ void test_sse_send_headers(void) {
  * test_sse_send_event - 测试事件格式
  */
 void test_sse_send_event(void) {
-    int client, server;
+    int client = 0, server = 0;
     TEST_ASSERT_EQUAL_INT(0, create_socket_pair(&client, &server));
 
     TEST_ASSERT_EQUAL_INT(0, sse_send_event(server, "test", "hello", 42));
@@ -82,7 +82,7 @@ void test_sse_send_event(void) {
  * test_sse_send_event_no_id - 测试无 ID 事件
  */
 void test_sse_send_event_no_id(void) {
-    int client, server;
+    int client = 0, server = 0;
     TEST_ASSERT_EQUAL_INT(0, create_socket_pair(&client, &server));
 
     TEST_ASSERT_EQUAL_INT(0, sse_send_event(server, "ping", "pong", 0));
@@ -104,7 +104,7 @@ void test_sse_send_event_no_id(void) {
  * test_sse_send_event_multiline - 测试多行数据
  */
 void test_sse_send_event_multiline(void) {
-    int client, server;
+    int client = 0, server = 0;
     TEST_ASSERT_EQUAL_INT(0, create_socket_pair(&client, &server));
 
     TEST_ASSERT_EQUAL_INT(0, sse_send_event(server, "msg", "line1\nline2", 1));
@@ -123,7 +123,7 @@ void test_sse_send_event_multiline(void) {
  * test_sse_send_comment - 测试心跳注释
  */
 void test_sse_send_comment(void) {
-    int client, server;
+    int client = 0, server = 0;
     TEST_ASSERT_EQUAL_INT(0, create_socket_pair(&client, &server));
 
     TEST_ASSERT_EQUAL_INT(0, sse_send_comment(server, "heartbeat"));
@@ -141,7 +141,7 @@ void test_sse_send_comment(void) {
  * test_sse_handle_request_405 - 测试非 GET 方法返回 405
  */
 void test_sse_handle_request_405(void) {
-    int client, server;
+    int client = 0, server = 0;
     TEST_ASSERT_EQUAL_INT(0, create_socket_pair(&client, &server));
 
     http_request_t req = {0};
@@ -166,7 +166,7 @@ void test_sse_handle_request_405(void) {
  * test_sse_handle_request_wrong_path - 测试非 SSE 路径返回 false
  */
 void test_sse_handle_request_wrong_path(void) {
-    int client, server;
+    int client = 0, server = 0;
     TEST_ASSERT_EQUAL_INT(0, create_socket_pair(&client, &server));
 
     http_request_t req = {0};

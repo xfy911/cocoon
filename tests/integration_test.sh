@@ -1358,7 +1358,7 @@ echo ""
 echo "=== SSE 测试 ==="
 
 # 测试 SSE 端点基本响应
-sse_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 "$BASE/_sse")
+sse_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 "$BASE/_sse" || true)
 if [[ "$sse_status" == "200" ]]; then
     echo "  ✓ /_sse 状态码 — HTTP 200"
     pass
@@ -1368,7 +1368,7 @@ else
 fi
 
 # 测试 SSE 内容类型
-sse_ct=$(curl -s -o /dev/null -w "%{content_type}" --max-time 2 "$BASE/_sse")
+sse_ct=$(curl -s -o /dev/null -w "%{content_type}" --max-time 2 "$BASE/_sse" || true)
 if echo "$sse_ct" | grep -q "text/event-stream"; then
     echo "  ✓ /_sse Content-Type — text/event-stream"
     pass
@@ -1378,7 +1378,7 @@ else
 fi
 
 # 测试 SSE 事件流格式（读取前几行验证）
-sse_body=$(curl -s --max-time 3 "$BASE/_sse" | head -20)
+sse_body=$(curl -s --max-time 3 "$BASE/_sse" | head -20 || true)
 if echo "$sse_body" | grep -q "event: connected"; then
     echo "  ✓ /_sse 事件流 — 包含 connected 事件"
     pass
@@ -1404,7 +1404,7 @@ else
 fi
 
 # 测试 SSE 不接受 POST（应该返回 405 或不被 SSE 处理）
-sse_post_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 1 -X POST "$BASE/_sse")
+sse_post_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 1 -X POST "$BASE/_sse" || true)
 if [[ "$sse_post_status" == "405" ]]; then
     echo "  ✓ /_sse POST 请求 — HTTP 405 Method Not Allowed"
     pass

@@ -131,6 +131,10 @@ $(UNIT_TEST_DIR)/test_load_balance: $(UNIT_TEST_DIR)/test_load_balance.c load_ba
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_load_balance.c load_balance.c proxy.c proxy_tls.c http.c log.c platform.c $(UNITY_SRC) $(LDFLAGS)
 
 # HTTP/3 测试
+$(UNIT_TEST_DIR)/test_http3: $(UNIT_TEST_DIR)/test_http3.c http3.c http.c log.c platform.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_http3.c http3.c http.c log.c platform.c $(UNITY_SRC) $(LDFLAGS)
+
+# SSE 测试
 $(UNIT_TEST_DIR)/test_sse: $(UNIT_TEST_DIR)/test_sse.c sse.c log.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_sse.c sse.c log.c $(UNITY_SRC) $(LDFLAGS)
 

@@ -3,19 +3,7 @@
 cocoon
 
 # 忽略测试二进制文件和上传目录
-tests/unit/test_config
-tests/unit/test_http
-tests/unit/test_log
-tests/unit/test_multipart
-tests/unit/test_static
-tests/unit/test_server
-tests/unit/test_websocket
-tests/unit/test_healthcheck
-tests/unit/test_proxy
-tests/unit/test_grpc
-tests/unit/test_http3
-tests/unit/test_load_balance
-tests/unit/test_middleware_ext
+tests/unit/test_*
 tests/fixtures/uploads/
 plugins/*.so
 www/uploads/

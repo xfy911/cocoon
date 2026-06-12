@@ -30,6 +30,7 @@
 #include "middleware.h"
 #include "proxy.h"
 #include "healthcheck.h"
+#include "sse.h"
 #include "config.h"
 #include <time.h>
 #include <stdio.h>
@@ -468,6 +469,26 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         }
     }
 
+    /* SSE 端点 */
+    if (sse_handle_request(conn->fd, &req)) {
+        conn->response_status = 200;
+        update_metrics(conn->response_status);
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, -1);
+        http_request_free(&req);
+        return true; /* SSE 保持连接 */
+    }
+
+    /* SSE 端点 */
+    if (sse_handle_request(conn->fd, &req)) {
+        conn->response_status = 200;
+        update_metrics(conn->response_status);
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, -1);
+        http_request_free(&req);
+        return true; /* SSE 保持连接 */
+    }
+
     /* 处理 POST */
     if (req.method == HTTP_POST) {
         bool keep = handle_post_request(conn->fd, &req, effective_root_dir);
@@ -580,6 +601,16 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
                          &req, conn->response_status, n);
         http_request_free(&req);
         return req.keep_alive;
+    }
+
+    /* SSE 端点 */
+    if (sse_handle_request(conn->fd, &req)) {
+        conn->response_status = 200;
+        update_metrics(conn->response_status);
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, -1);
+        http_request_free(&req);
+        return true; /* SSE 保持连接 */
     }
 
     /* Prometheus 指标端点 */

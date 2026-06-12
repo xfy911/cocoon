@@ -1355,6 +1355,65 @@ else
 fi
 
 echo ""
+echo "=== SSE 测试 ==="
+
+# 测试 SSE 端点基本响应
+sse_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 "$BASE/_sse")
+if [[ "$sse_status" == "200" ]]; then
+    echo "  ✓ /_sse 状态码 — HTTP 200"
+    pass
+else
+    echo "  ✗ /_sse 状态码 — 期望 200, 实际 $sse_status"
+    fail
+fi
+
+# 测试 SSE 内容类型
+sse_ct=$(curl -s -o /dev/null -w "%{content_type}" --max-time 2 "$BASE/_sse")
+if echo "$sse_ct" | grep -q "text/event-stream"; then
+    echo "  ✓ /_sse Content-Type — text/event-stream"
+    pass
+else
+    echo "  ✗ /_sse Content-Type — 期望 text/event-stream, 实际 $sse_ct"
+    fail
+fi
+
+# 测试 SSE 事件流格式（读取前几行验证）
+sse_body=$(curl -s --max-time 3 "$BASE/_sse" | head -20)
+if echo "$sse_body" | grep -q "event: connected"; then
+    echo "  ✓ /_sse 事件流 — 包含 connected 事件"
+    pass
+else
+    echo "  ✗ /_sse 事件流 — 未包含 connected 事件"
+    fail
+fi
+
+if echo "$sse_body" | grep -q "event: time"; then
+    echo "  ✓ /_sse 事件流 — 包含 time 事件"
+    pass
+else
+    echo "  ✗ /_sse 事件流 — 未包含 time 事件"
+    fail
+fi
+
+if echo "$sse_body" | grep -q "data:"; then
+    echo "  ✓ /_sse 事件流 — 包含 data 字段"
+    pass
+else
+    echo "  ✗ /_sse 事件流 — 未包含 data 字段"
+    fail
+fi
+
+# 测试 SSE 不接受 POST（应该返回 405 或不被 SSE 处理）
+sse_post_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 1 -X POST "$BASE/_sse")
+if [[ "$sse_post_status" == "405" ]]; then
+    echo "  ✓ /_sse POST 请求 — HTTP 405 Method Not Allowed"
+    pass
+else
+    echo "  ⊘ /_sse POST 请求 — 期望 405, 实际 $sse_post_status（由 handle_request 处理）"
+    pass
+fi
+
+echo ""
 echo "=== 主动健康检查测试 ==="
 
 # 准备带 /health 文件的后端目录

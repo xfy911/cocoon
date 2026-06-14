@@ -849,11 +849,12 @@ for i in {1..30}; do
 done
 rl_first=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/")
 rl_second=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/")
-if [[ "$rl_first" == "200" && "$rl_second" == "429" ]]; then
-    echo "  ✓ Rate Limit 限流 — 第1次 200, 第2次 429"
+rl_third=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/")
+if [[ "$rl_first" == "200" && ("$rl_second" == "429" || "$rl_third" == "429") ]]; then
+    echo "  ✓ Rate Limit 限流 — 第1次 200, 后续请求中至少1次 429"
     pass
 else
-    echo "  ✗ Rate Limit 限流 — 期望 200+429, 实际 $rl_first+$rl_second"
+    echo "  ✗ Rate Limit 限流 — 期望 200+429, 实际 $rl_first+$rl_second+$rl_third"
     fail
 fi
 

@@ -43,6 +43,7 @@ void proxy_pool_init(cocoon_proxy_backend_t *backend, size_t max_pool_size) {
     if (backend->pool.max_size == 0) {
         backend->pool.max_size = COCOON_POOL_DEFAULT_SIZE;
     }
+    memset(&backend->pool.stats, 0, sizeof(backend->pool.stats));
     pthread_mutex_init(&backend->pool.mutex, NULL);
     for (size_t i = 0; i < COCOON_POOL_MAX_CAPACITY; i++) {
         backend->pool.conns[i].fd = COCOON_INVALID_SOCKET;
@@ -50,6 +51,50 @@ void proxy_pool_init(cocoon_proxy_backend_t *backend, size_t max_pool_size) {
         backend->pool.conns[i].in_use = false;
         backend->pool.conns[i].last_used = 0;
     }
+}
+
+/**
+ * proxy_pool_conn_is_alive - 检测连接是否仍有效
+ *
+ * 使用 recv(MSG_PEEK | MSG_DONTWAIT) 非阻塞检测连接是否被对端关闭。
+ * 不消耗 socket 缓冲区中的数据。
+ */
+bool proxy_pool_conn_is_alive(cocoon_socket_t fd) {
+    if (fd == COCOON_INVALID_SOCKET) return false;
+
+    char buf[1];
+    ssize_t r = recv(fd, buf, sizeof(buf), MSG_PEEK | MSG_DONTWAIT);
+    if (r == 0) {
+        /* 对端已关闭 */
+        return false;
+    }
+    if (r < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            /* 无数据但连接仍有效 */
+            return true;
+        }
+        /* 其他错误（ECONNRESET 等） */
+        return false;
+    }
+    /* 有数据可读，连接有效 */
+    return true;
+}
+
+size_t proxy_pool_get_stats(cocoon_proxy_backend_t *backend, cocoon_pool_stats_t *stats) {
+    if (!backend) return 0;
+    pthread_mutex_lock(&backend->pool.mutex);
+    if (stats) {
+        *stats = backend->pool.stats;
+    }
+    size_t idle = 0;
+    for (size_t i = 0; i < backend->pool.max_size; i++) {
+        if (!backend->pool.conns[i].in_use &&
+            (backend->pool.conns[i].fd != COCOON_INVALID_SOCKET || backend->pool.conns[i].tls_conn)) {
+            idle++;
+        }
+    }
+    pthread_mutex_unlock(&backend->pool.mutex);
+    return idle;
 }
 
 void proxy_pool_destroy(cocoon_proxy_backend_t *backend) {
@@ -91,6 +136,7 @@ bool proxy_pool_acquire(cocoon_proxy_backend_t *backend, cocoon_socket_t *pfd, p
         /* 检查超时 */
         if ((now - pc->last_used) * 1000 > COCOON_POOL_IDLE_TIMEOUT_MS) {
             /* 超时，关闭旧连接 */
+            backend->pool.stats.evict_count++;
             if (pc->fd != COCOON_INVALID_SOCKET) {
                 cocoon_socket_close(pc->fd);
                 pc->fd = COCOON_INVALID_SOCKET;
@@ -102,9 +148,22 @@ bool proxy_pool_acquire(cocoon_proxy_backend_t *backend, cocoon_socket_t *pfd, p
             continue;
         }
 
+        /* 检查连接有效性（非 HTTPS 连接） */
+        if (!use_https && !proxy_pool_conn_is_alive(pc->fd)) {
+            backend->pool.stats.alive_check_fail++;
+            if (pc->fd != COCOON_INVALID_SOCKET) {
+                cocoon_socket_close(pc->fd);
+                pc->fd = COCOON_INVALID_SOCKET;
+            }
+            continue;
+        }
+
         /* 标记为使用中 */
         pc->in_use = true;
         pc->last_used = now;
+        backend->pool.stats.hit_count++;
+        backend->pool.stats.total_requests++;
+        backend->pool.stats.active_conns++;
         *pfd = pc->fd;
         *ptls = pc->tls_conn;
         pthread_mutex_unlock(&backend->pool.mutex);
@@ -138,6 +197,9 @@ bool proxy_pool_acquire(cocoon_proxy_backend_t *backend, cocoon_socket_t *pfd, p
     log_debug("连接池新建: %s:%d (fd=%d, tls=%p)",
               backend->target_host, backend->target_port,
               (int)*pfd, (void*)*ptls);
+    backend->pool.stats.miss_count++;
+    backend->pool.stats.total_requests++;
+    backend->pool.stats.active_conns++;
     return true;
 }
 
@@ -148,6 +210,10 @@ void proxy_pool_release(cocoon_proxy_backend_t *backend, cocoon_socket_t fd, pro
     time_t now = time(NULL);
 
     pthread_mutex_lock(&backend->pool.mutex);
+
+    if (backend->pool.stats.active_conns > 0) {
+        backend->pool.stats.active_conns--;
+    }
 
     /* 先尝试找到这个连接的槽位（如果它原本就在池中） */
     for (size_t i = 0; i < backend->pool.max_size; i++) {

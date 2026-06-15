@@ -27,6 +27,19 @@
 #define COCOON_UNHEALTHY_THRESHOLD 3  /* 连续失败次数标记不健康 */
 
 /**
+ * cocoon_pool_stats_t - 连接池统计
+ */
+typedef struct {
+    uint64_t total_requests;    /**< 总请求次数 */
+    uint64_t hit_count;         /**< 复用命中次数 */
+    uint64_t miss_count;        /**< 新建连接次数 */
+    uint64_t evict_count;       /**< 超时驱逐次数 */
+    uint64_t alive_check_fail;  /**< 有效性检测失败次数 */
+    size_t   active_conns;      /**< 当前活跃连接数 */
+    size_t   idle_conns;        /**< 当前空闲连接数 */
+} cocoon_pool_stats_t;
+
+/**
  * cocoon_pooled_conn_t - 连接池中的单个连接
  */
 typedef struct {
@@ -42,7 +55,8 @@ typedef struct {
 typedef struct {
     cocoon_pooled_conn_t conns[COCOON_POOL_MAX_CAPACITY]; /**< 空闲连接数组（上限16） */
     size_t max_size;                                      /**< 实际配置大小（默认4） */
-    pthread_mutex_t mutex;                                /**< 保护锁 */
+    cocoon_pool_stats_t stats;  /**< 连接池统计 */
+    pthread_mutex_t mutex;        /**< 保护锁 */
 } cocoon_conn_pool_t;
 
 /**
@@ -170,5 +184,25 @@ bool proxy_pool_acquire(cocoon_proxy_backend_t *backend, cocoon_socket_t *pfd, p
  * @param tls_conn TLS 连接（NULL 表示非 HTTPS）
  */
 void proxy_pool_release(cocoon_proxy_backend_t *backend, cocoon_socket_t fd, proxy_tls_conn_t *tls_conn);
+
+/**
+ * proxy_pool_get_stats - 获取连接池统计
+ *
+ * @param backend 后端配置
+ * @param stats 输出统计结构（可选）
+ * @return 当前空闲连接数
+ */
+size_t proxy_pool_get_stats(cocoon_proxy_backend_t *backend, cocoon_pool_stats_t *stats);
+
+/**
+ * proxy_pool_conn_is_alive - 检测连接是否仍有效
+ *
+ * 使用 recv(MSG_PEEK) 非阻塞检测连接是否被对端关闭。
+ * 不消耗 socket 缓冲区中的数据。
+ *
+ * @param fd socket 文件描述符
+ * @return true 连接有效，false 连接已失效
+ */
+bool proxy_pool_conn_is_alive(cocoon_socket_t fd);
 
 #endif /* COCOON_PROXY_H */

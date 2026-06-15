@@ -3,6 +3,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 /* 白盒测试：包含 proxy.c 以访问静态函数 */
 #define UNIT_TEST
@@ -364,6 +366,126 @@ void test_pool_init_zero_uses_default(void) {
     proxy_pool_destroy(&backend);
 }
 
+/* ===== proxy_pool_conn_is_alive ===== */
+
+void test_conn_is_alive_invalid_fd(void) {
+    TEST_ASSERT_FALSE(proxy_pool_conn_is_alive(COCOON_INVALID_SOCKET));
+}
+
+void test_conn_is_alive_closed_fd(void) {
+    int fds[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+        TEST_IGNORE_MESSAGE("socketpair 创建失败，跳过测试");
+        return;
+    }
+    close(fds[0]); /* 关闭一端 */
+    /* 另一端应该检测到对端关闭 */
+    TEST_ASSERT_FALSE(proxy_pool_conn_is_alive(fds[1]));
+    close(fds[1]);
+}
+
+void test_conn_is_alive_valid_socket(void) {
+    int fds[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+        TEST_IGNORE_MESSAGE("socketpair 创建失败，跳过测试");
+        return;
+    }
+    /* 两端都打开，连接有效 */
+    TEST_ASSERT_TRUE(proxy_pool_conn_is_alive(fds[1]));
+    close(fds[0]);
+    close(fds[1]);
+}
+
+/* ===== proxy_pool_acquire / release 循环 ===== */
+
+void test_pool_acquire_release_cycle(void) {
+    cocoon_proxy_backend_t backend = {0};
+    backend.target_https = false;
+    proxy_pool_init(&backend, 2);
+
+    /* 模拟连接：用 socketpair */
+    int fds[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+        TEST_IGNORE_MESSAGE("socketpair 创建失败，跳过测试");
+        proxy_pool_destroy(&backend);
+        return;
+    }
+
+    /* 第一次 acquire：池中无可用连接，但当前代码没有真实连接时不会新建
+     * 我们手动将一个 socket 放入池中，模拟已有连接 */
+    backend.pool.conns[0].fd = fds[1];
+    backend.pool.conns[0].in_use = false;
+    backend.pool.conns[0].last_used = time(NULL);
+
+    cocoon_socket_t pfd = COCOON_INVALID_SOCKET;
+    proxy_tls_conn_t *ptls = NULL;
+    bool ok = proxy_pool_acquire(&backend, &pfd, &ptls);
+    TEST_ASSERT_TRUE(ok);
+    TEST_ASSERT_EQUAL(fds[1], pfd);
+    TEST_ASSERT_NULL(ptls);
+
+    /* 释放回池 */
+    proxy_pool_release(&backend, pfd, ptls);
+
+    /* 再次 acquire，应该复用 */
+    cocoon_socket_t pfd2 = COCOON_INVALID_SOCKET;
+    proxy_tls_conn_t *ptls2 = NULL;
+    ok = proxy_pool_acquire(&backend, &pfd2, &ptls2);
+    TEST_ASSERT_TRUE(ok);
+    TEST_ASSERT_EQUAL(fds[1], pfd2);
+
+    /* 统计：2次复用（第一次 + 第二次） */
+    cocoon_pool_stats_t stats;
+    proxy_pool_get_stats(&backend, &stats);
+    TEST_ASSERT_EQUAL(2, stats.hit_count);
+    TEST_ASSERT_EQUAL(0, stats.miss_count);
+
+    proxy_pool_release(&backend, pfd2, ptls2);
+    proxy_pool_destroy(&backend);
+    close(fds[0]);
+}
+
+void test_pool_acquire_new_conn_miss(void) {
+    cocoon_proxy_backend_t backend = {0};
+    backend.target_https = false;
+    strcpy(backend.target_host, "255.255.255.255"); /* 不可达，新建连接会失败 */
+    backend.target_port = 1;
+    proxy_pool_init(&backend, 2);
+
+    /* 空池 acquire：会尝试新建连接 */
+    cocoon_socket_t pfd = COCOON_INVALID_SOCKET;
+    proxy_tls_conn_t *ptls = NULL;
+    bool ok = proxy_pool_acquire(&backend, &pfd, &ptls);
+    /* 新建连接会失败（因为 target 不可达） */
+    TEST_ASSERT_FALSE(ok);
+
+    /* 统计：miss_count 应该没有增加，因为连接没建立成功 */
+    cocoon_pool_stats_t stats;
+    proxy_pool_get_stats(&backend, &stats);
+    TEST_ASSERT_EQUAL(0, stats.miss_count);
+    TEST_ASSERT_EQUAL(0, stats.hit_count);
+
+    proxy_pool_destroy(&backend);
+}
+
+/* ===== proxy_pool_get_stats ===== */
+
+void test_pool_stats_initial(void) {
+    cocoon_proxy_backend_t backend = {0};
+    proxy_pool_init(&backend, 4);
+
+    cocoon_pool_stats_t stats;
+    size_t idle = proxy_pool_get_stats(&backend, &stats);
+    TEST_ASSERT_EQUAL(0, idle);
+    TEST_ASSERT_EQUAL(0, stats.total_requests);
+    TEST_ASSERT_EQUAL(0, stats.hit_count);
+    TEST_ASSERT_EQUAL(0, stats.miss_count);
+    TEST_ASSERT_EQUAL(0, stats.active_conns);
+    TEST_ASSERT_EQUAL(0, stats.evict_count);
+
+    proxy_pool_destroy(&backend);
+}
+
 /* ===== 主函数 ===== */
 
 int main(void) {
@@ -417,6 +539,18 @@ int main(void) {
     RUN_TEST(test_pool_init_default_size);
     RUN_TEST(test_pool_init_capped);
     RUN_TEST(test_pool_init_zero_uses_default);
+
+    /* proxy_pool_conn_is_alive */
+    RUN_TEST(test_conn_is_alive_invalid_fd);
+    RUN_TEST(test_conn_is_alive_closed_fd);
+    RUN_TEST(test_conn_is_alive_valid_socket);
+
+    /* proxy_pool_acquire/release */
+    RUN_TEST(test_pool_acquire_release_cycle);
+    RUN_TEST(test_pool_acquire_new_conn_miss);
+
+    /* proxy_pool_stats */
+    RUN_TEST(test_pool_stats_initial);
 
     return UNITY_END();
 }

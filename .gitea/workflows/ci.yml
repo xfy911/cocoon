@@ -33,7 +33,7 @@ jobs:
           make -j$(nproc)
 
       - name: Build cocoon
-        run: make
+        run: make build-all
 
       - name: Run unit tests
         run: make unit-test

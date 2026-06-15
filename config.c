@@ -99,6 +99,63 @@ static void parser_skip_ws(parser_t *p) {
  * @param p 解析器状态结构
  * @return 下一个 token
  */
+static token_t parser_next_token(parser_t *p);
+
+// 期望当前 token 为字符串并返回其值（释放时需调用者 free）
+static char *parser_expect_string(parser_t *p, token_t t) {
+    if (t.type != TOKEN_STRING) {
+        return NULL;
+    }
+    return strndup(t.start, t.len);
+}
+
+// 跳过当前值（对象或数组或基本值）
+static void parser_skip_value(parser_t *p) {
+    token_t t = parser_next_token(p);
+    if (t.type == TOKEN_LBRACE) {
+        while (1) {
+            t = parser_next_token(p);
+            if (t.type == TOKEN_RBRACE) break;
+            if (t.type == TOKEN_STRING) {
+                t = parser_next_token(p); // colon
+                if (t.type == TOKEN_COLON) {
+                    parser_skip_value(p); // value
+                }
+                t = parser_next_token(p); // comma or rbrace
+                if (t.type == TOKEN_RBRACE) break;
+                if (t.type != TOKEN_COMMA) break;
+            } else {
+                break;
+            }
+        }
+    } else if (t.type == TOKEN_LBRACKET) {
+        while (1) {
+            t = parser_next_token(p);
+            if (t.type == TOKEN_RBRACKET) break;
+            if (t.type == TOKEN_COMMA) continue;
+            if (t.type == TOKEN_EOF) break;
+            parser_skip_value(p);
+            t = parser_next_token(p);
+            if (t.type == TOKEN_RBRACKET) break;
+            if (t.type != TOKEN_COMMA) break;
+        }
+    } else if (t.type == TOKEN_STRING) {
+        // skip already consumed
+    } else if (t.type == TOKEN_NUMBER) {
+        // skip already consumed
+    } else if (t.type == TOKEN_TRUE || t.type == TOKEN_FALSE) {
+        // skip already consumed
+    }
+}
+
+// 返回当前数字 token 的字符串值
+static char *parser_number_str(parser_t *p, token_t t) {
+    if (t.type != TOKEN_NUMBER) {
+        return NULL;
+    }
+    return strndup(t.start, t.len);
+}
+
 static token_t parser_next_token(parser_t *p) {
     parser_skip_ws(p);
     token_t t = {TOKEN_INVALID, NULL, 0, p->line};
@@ -635,6 +692,42 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
             } else {
                 fprintf(stderr, "[Config] 第 %d 行: fastcgi 期望数组\n", val.line);
             }
+        } else if (strcmp(key_str, "cache") == 0) {
+            if (val.type == TOKEN_LBRACE) {
+                while (1) {
+                    token_t ckey = parser_next_token(&p);
+                    if (ckey.type == TOKEN_RBRACE) break;
+                    if (ckey.type != TOKEN_STRING) {
+                        parser_skip_value(&p);
+                        continue;
+                    }
+                    char *ck_str = parser_expect_string(&p, ckey);
+                    token_t csep = parser_next_token(&p);
+                    if (csep.type != TOKEN_COLON) {
+                        free(ck_str);
+                        parser_skip_value(&p);
+                        continue;
+                    }
+                    token_t cval = parser_next_token(&p);
+                    if (strcmp(ck_str, "enabled") == 0 && cval.type == TOKEN_TRUE) {
+                        config->cache_enabled = true;
+                    } else if (strcmp(ck_str, "enabled") == 0 && cval.type == TOKEN_FALSE) {
+                        config->cache_enabled = false;
+                    } else if (strcmp(ck_str, "max_size") == 0 && cval.type == TOKEN_NUMBER) {
+                        config->cache_max_size = (size_t)strtoul(parser_number_str(&p, cval), NULL, 10);
+                    } else if (strcmp(ck_str, "ttl_seconds") == 0 && cval.type == TOKEN_NUMBER) {
+                        config->cache_ttl_seconds = (uint32_t)strtoul(parser_number_str(&p, cval), NULL, 10);
+                    } else if (strcmp(ck_str, "max_entry_size") == 0 && cval.type == TOKEN_NUMBER) {
+                        config->cache_max_entry_size = (size_t)strtoul(parser_number_str(&p, cval), NULL, 10);
+                    }
+                    free(ck_str);
+                    token_t csep2 = parser_next_token(&p);
+                    if (csep2.type == TOKEN_RBRACE) break;
+                    if (csep2.type != TOKEN_COMMA) break;
+                }
+            } else {
+                fprintf(stderr, "[Config] 第 %d 行: cache 期望对象\n", val.line);
+            }
         } /* 其他字段：忽略（未来扩展预留） */
 
         free(key_str);
@@ -800,6 +893,26 @@ bool config_validate(const cocoon_config_t *config, char *err_buf, size_t err_si
         }
     }
 
+    /* 缓存配置校验 */
+    if (config->cache_enabled) {
+        if (config->cache_max_size > 0 && config->cache_max_size < 4096) {
+            SET_ERR("cache max_size 如果指定，至少 4096 字节");
+            return false;
+        }
+        if (config->cache_ttl_seconds > 0 && config->cache_ttl_seconds < 1) {
+            SET_ERR("cache ttl_seconds 至少 1 秒");
+            return false;
+        }
+        if (config->cache_max_entry_size > 0 && config->cache_max_entry_size < 256) {
+            SET_ERR("cache max_entry_size 如果指定，至少 256 字节");
+            return false;
+        }
+        if (config->cache_max_entry_size > config->cache_max_size && config->cache_max_size > 0) {
+            SET_ERR("cache max_entry_size 不能超过 max_size");
+            return false;
+        }
+    }
+
 #undef SET_ERR
     return true;
 }
@@ -836,7 +949,9 @@ void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
                   bool has_access_log,
                   bool has_cors_enabled, bool has_auth_user, bool has_auth_pass,
                   bool has_rate_limit,
-                  bool has_plugins) {
+                  bool has_plugins,
+                  bool has_cache_enabled, bool has_cache_max_size,
+                  bool has_cache_ttl_seconds, bool has_cache_max_entry_size) {
     if (!base || !cmdline) return;
 
     /* 命令行显式指定的值覆盖配置文件 */
@@ -881,6 +996,10 @@ void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
             }
         }
     }
+    if (has_cache_enabled) base->cache_enabled = cmdline->cache_enabled;
+    if (has_cache_max_size) base->cache_max_size = cmdline->cache_max_size;
+    if (has_cache_ttl_seconds) base->cache_ttl_seconds = cmdline->cache_ttl_seconds;
+    if (has_cache_max_entry_size) base->cache_max_entry_size = cmdline->cache_max_entry_size;
     /* threaded 是 flag 参数，命令行指定了就用命令行的 */
     if (cmdline->threaded) base->threaded = true;
 }

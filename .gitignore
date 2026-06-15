@@ -8,6 +8,10 @@ tests/unit/test_*
 !tests/unit/test_*.c
 
 # 测试编译产物（无后缀名的二进制文件）
-tests/unit/test_*.otests/fixtures/uploads/
+tests/unit/test_*
+!tests/unit/test_*.c
+
+# 上传目录
+tests/fixtures/uploads/
 plugins/*.so
 www/uploads/

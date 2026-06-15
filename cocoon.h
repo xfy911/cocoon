@@ -86,6 +86,17 @@ typedef struct cocoon_config {
     /* 虚拟主机 */
     cocoon_vhost_t vhosts[COCOON_MAX_VHOSTS];
     size_t num_vhosts;
+    /* FastCGI 配置 */
+#define COCOON_MAX_FASTCGI_RULES 4
+    struct {
+        char prefix[256];      /**< 路径前缀匹配 */
+        char host[256];        /**< 后端主机或 Unix socket 路径 */
+        int port;              /**< 端口（TCP 时有效） */
+        bool is_unix_socket;   /**< 是否为 Unix domain socket */
+        int pool_size;         /**< 连接池大小 */
+        int timeout_ms;        /**< 请求超时 */
+    } fastcgi[COCOON_MAX_FASTCGI_RULES];
+    size_t num_fastcgi;
 } cocoon_config_t;
 
 /* === 服务器生命周期 API === */

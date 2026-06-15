@@ -566,6 +566,75 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
             } else {
                 fprintf(stderr, "[Config] 第 %d 行: vhosts 期望数组\n", val.line);
             }
+        } else if (strcmp(key_str, "fastcgi") == 0) {
+            if (val.type == TOKEN_LBRACKET) {
+                while (1) {
+                    token_t item = parser_next_token(&p);
+                    if (item.type == TOKEN_RBRACKET) break;
+                    if (item.type == TOKEN_LBRACE) {
+                        char prefix[256] = {0};
+                        char host[256] = {0};
+                        int port = 0;
+                        bool is_unix = false;
+                        int pool_size = 4;
+                        int timeout_ms = 30000;
+                        while (1) {
+                            token_t fkey = parser_next_token(&p);
+                            if (fkey.type == TOKEN_RBRACE) break;
+                            if (fkey.type != TOKEN_STRING) {
+                                token_t skip_sep = parser_next_token(&p);
+                                if (skip_sep.type == TOKEN_RBRACE) break;
+                                continue;
+                            }
+                            if (!token_expect(&p, TOKEN_COLON)) break;
+                            token_t fval = parser_next_token(&p);
+                            char *fk = token_str_dup(&fkey);
+                            if (strcmp(fk, "prefix") == 0 && fval.type == TOKEN_STRING) {
+                                char *v = token_str_dup(&fval);
+                                if (v) { strncpy(prefix, v, sizeof(prefix)-1); free(v); }
+                            } else if (strcmp(fk, "host") == 0 && fval.type == TOKEN_STRING) {
+                                char *v = token_str_dup(&fval);
+                                if (v) { strncpy(host, v, sizeof(host)-1); free(v); }
+                            } else if (strcmp(fk, "port") == 0 && fval.type == TOKEN_NUMBER) {
+                                port = (int)token_to_long(&fval);
+                            } else if (strcmp(fk, "unix_socket") == 0) {
+                                if (fval.type == TOKEN_TRUE) is_unix = true;
+                                else if (fval.type == TOKEN_FALSE) is_unix = false;
+                            } else if (strcmp(fk, "pool_size") == 0 && fval.type == TOKEN_NUMBER) {
+                                pool_size = (int)token_to_long(&fval);
+                            } else if (strcmp(fk, "timeout_ms") == 0 && fval.type == TOKEN_NUMBER) {
+                                timeout_ms = (int)token_to_long(&fval);
+                            }
+                            free(fk);
+                            token_t fsep = parser_next_token(&p);
+                            if (fsep.type == TOKEN_RBRACE) break;
+                            if (fsep.type != TOKEN_COMMA) break;
+                        }
+                        if (prefix[0] && host[0] && config->num_fastcgi < COCOON_MAX_FASTCGI_RULES) {
+                            size_t i = config->num_fastcgi;
+                            strncpy(config->fastcgi[i].prefix, prefix, sizeof(config->fastcgi[0].prefix)-1);
+                            config->fastcgi[i].prefix[sizeof(config->fastcgi[0].prefix)-1] = '\0';
+                            strncpy(config->fastcgi[i].host, host, sizeof(config->fastcgi[0].host)-1);
+                            config->fastcgi[i].host[sizeof(config->fastcgi[0].host)-1] = '\0';
+                            config->fastcgi[i].port = port;
+                            config->fastcgi[i].is_unix_socket = is_unix;
+                            config->fastcgi[i].pool_size = pool_size > 0 ? pool_size : 4;
+                            config->fastcgi[i].timeout_ms = timeout_ms > 0 ? timeout_ms : 30000;
+                            config->num_fastcgi++;
+                        }
+                    } else {
+                        fprintf(stderr, "[Config] 第 %d 行: fastcgi 数组期望对象项\n", item.line);
+                    }
+                    token_t sep = parser_next_token(&p);
+                    if (sep.type == TOKEN_RBRACKET) break;
+                    if (sep.type != TOKEN_COMMA) {
+                        fprintf(stderr, "[Config] 第 %d 行: fastcgi 数组期望 ',' 或 ']'\n", sep.line);
+                        break;
+                    }
+                }
+            } else {
+                fprintf(stderr, "[Config] 第 %d 行: fastcgi 期望数组\n", val.line);
+            }
         } /* 其他字段：忽略（未来扩展预留） */
 
         free(key_str);

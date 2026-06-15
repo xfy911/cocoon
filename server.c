@@ -32,6 +32,7 @@
 #include "healthcheck.h"
 #include "sse.h"
 #include "config.h"
+#include "fcgi_handler.h"
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -77,10 +78,10 @@ struct server_context {
     volatile int        running;      /**< 运行标志 */
     coco_sched_t       *sched;        /**< 协程调度器 */
     const char         *config_file_path; /**< 配置文件路径（用于热重载） */
+    /* FastCGI 配置 */
+    cocoon_fcgi_config_t fcgi_config;
     volatile int        reload_requested; /**< 配置热重载请求标志 */
 };
-
-/* 全局活跃连接计数器（线程安全） */
 static atomic_int g_active_connections = 0;
 /* 服务器启动时间 */
 static time_t g_server_start_time = 0;
@@ -506,6 +507,20 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         if (rule) {
             bool keep = proxy_forward(conn->fd, &req, rule, &conn->client_addr);
             conn->response_status = 200; /* 代理响应状态由后端决定，这里记录一个通用值 */
+            update_metrics(conn->response_status);
+            access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                             &req, conn->response_status, -1);
+            http_request_free(&req);
+            return keep;
+        }
+    }
+
+    /* FastCGI 检查 */
+    if (conn->ctx && conn->ctx->fcgi_config.count > 0) {
+        cocoon_fcgi_rule_t *fcgi_rule = fcgi_handler_match(&conn->ctx->fcgi_config, req.path);
+        if (fcgi_rule) {
+            bool keep = fcgi_handler_forward(conn->fd, &req, fcgi_rule);
+            conn->response_status = 200; /* FastCGI 响应状态由后端决定 */
             update_metrics(conn->response_status);
             access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
                              &req, conn->response_status, -1);
@@ -1373,6 +1388,11 @@ server_context_t *server_create(const cocoon_config_t *config, const char *confi
         }
     }
 
+    /* 初始化 FastCGI 处理器 */
+    if (!fcgi_handler_init(&ctx->fcgi_config, &ctx->config)) {
+        log_warn("FastCGI 初始化失败，FastCGI 路由不可用");
+    }
+
     /* 启动主动健康检查 */
     healthcheck_manager_init(&ctx->hc_manager);
     healthcheck_start(&ctx->hc_manager, &ctx->proxy_config, ctx->config.timeout_ms);
@@ -1588,6 +1608,9 @@ void server_destroy(server_context_t *ctx) {
 
     /* 关闭反向代理连接池 */
     proxy_config_destroy(&ctx->proxy_config);
+
+    /* 关闭 FastCGI 连接池 */
+    fcgi_handler_destroy(&ctx->fcgi_config);
 
     /* 卸载插件 */
     cocoon_plugin_unload_all();

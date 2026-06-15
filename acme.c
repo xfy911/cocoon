@@ -78,35 +78,28 @@ static char *base64url_encode(const unsigned char *in, size_t len) {
 }
 
 /**
- * base64url_decode - Base64url 解码
+ * get_ec_pub_coords - 从 EVP_PKEY 提取 EC 公钥 x/y 坐标（Base64url）
+ * 使用 OpenSSL 3.0 EVP API，避免弃用的 EC_KEY 接口
  */
-static unsigned char *base64url_decode(const char *in, size_t *out_len) {
-    size_t len = strlen(in);
-    char *normalized = (char *)malloc(len + 4);
-    if (!normalized) return NULL;
-    strcpy(normalized, in);
-    /* 替换 - → +, _ → / */
-    for (char *p = normalized; *p; p++) {
-        if (*p == '-') *p = '+';
-        else if (*p == '_') *p = '/';
+static int get_ec_pub_coords(EVP_PKEY *pkey, char **x_b64, char **y_b64) {
+    size_t pub_len = 0;
+    if (!EVP_PKEY_get_octet_string_param(pkey, "pub", NULL, 0, &pub_len)) {
+        return -1;
     }
-    /* 补齐填充 */
-    size_t pad = (4 - (len % 4)) % 4;
-    for (size_t i = 0; i < pad; i++) normalized[len + i] = '=';
-    normalized[len + pad] = '\0';
-
-    BIO *b64 = BIO_new(BIO_f_base64());
-    BIO *mem = BIO_new_mem_buf(normalized, -1);
-    b64 = BIO_push(b64, mem);
-    BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
-
-    unsigned char *out = (unsigned char *)malloc(len + 4);
-    int n = BIO_read(b64, out, (int)(len + 4));
-    free(normalized);
-    BIO_free_all(b64);
-    if (n < 0) { free(out); return NULL; }
-    *out_len = (size_t)n;
-    return out;
+    unsigned char *pub = (unsigned char *)malloc(pub_len);
+    if (!pub) return -1;
+    if (!EVP_PKEY_get_octet_string_param(pkey, "pub", pub, pub_len, &pub_len)) {
+        free(pub);
+        return -1;
+    }
+    if (pub_len < 65 || pub[0] != 0x04) {
+        free(pub);
+        return -1;
+    }
+    *x_b64 = base64url_encode(pub + 1, 32);
+    *y_b64 = base64url_encode(pub + 33, 32);
+    free(pub);
+    return (*x_b64 && *y_b64) ? 0 : -1;
 }
 
 /* ===== CURL 回调 ===== */
@@ -207,22 +200,14 @@ int acme_http_post_jws(acme_ctx_t *ctx, const char *url, const char *payload,
 
     /* 构建 JWS Protected Header */
     const char *alg = "ES256";
-    EC_KEY *ec = EVP_PKEY_get1_EC_KEY(ctx->account_key);
-    const EC_POINT *pub = EC_KEY_get0_public_key(ec);
-    const EC_GROUP *grp = EC_KEY_get0_group(ec);
-
-    BIGNUM *x = BN_new(), *y = BN_new();
-    EC_POINT_get_affine_coordinates_GFp(grp, pub, x, y, NULL);
-
-    char *x_b64 = base64url_encode((unsigned char *)BN_bn2hex(x), strlen(BN_bn2hex(x)) / 2);
-    char *y_b64 = base64url_encode((unsigned char *)BN_bn2hex(y), strlen(BN_bn2hex(y)) / 2);
-    /* 实际上需要原始字节，不是 hex，这里简化处理 */
-    BN_free(x); BN_free(y);
-    EC_KEY_free(ec);
+    char *x_b64 = NULL, *y_b64 = NULL;
+    if (get_ec_pub_coords(ctx->account_key, &x_b64, &y_b64) < 0) {
+        log_error("获取公钥坐标失败");
+        return -1;
+    }
 
     /* 构建 JWK */
     char jwk[1024];
-    /* 简化的 JWK，实际需要 x/y 的 base64url 编码 */
     snprintf(jwk, sizeof(jwk),
         "{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"%s\",\"y\":\"%s\"}",
         x_b64 ? x_b64 : "", y_b64 ? y_b64 : "");
@@ -567,7 +552,7 @@ int acme_create_order(acme_ctx_t *ctx, const char **domains, size_t num_domains,
 
     /* 解析订单响应 */
     if (resp.location[0]) {
-        strncpy(out->uri, resp.location, sizeof(out->uri) - 1);
+        snprintf(out->uri, sizeof(out->uri), "%s", resp.location);
     }
 
     /* 提取 status */
@@ -920,27 +905,18 @@ int acme_download_certificate(acme_ctx_t *ctx, const char *cert_url, char **out_
 /* ===== Thumbprint ===== */
 
 int acme_get_thumbprint(acme_ctx_t *ctx, char **out) {
-    /* 构建 JWK */
-    EC_KEY *ec = EVP_PKEY_get1_EC_KEY(ctx->account_key);
-    const EC_POINT *pub = EC_KEY_get0_public_key(ec);
-    const EC_GROUP *grp = EC_KEY_get0_group(ec);
-
-    BIGNUM *x = BN_new(), *y = BN_new();
-    EC_POINT_get_affine_coordinates_GFp(grp, pub, x, y, NULL);
-
-    /* x, y 转原始字节 */
-    unsigned char x_bytes[32], y_bytes[32];
-    int x_len = BN_bn2binpad(x, x_bytes, 32);
-    int y_len = BN_bn2binpad(y, y_bytes, 32);
-    BN_free(x); BN_free(y);
-    EC_KEY_free(ec);
+    char *x_b64 = NULL, *y_b64 = NULL;
+    if (get_ec_pub_coords(ctx->account_key, &x_b64, &y_b64) < 0) {
+        return -1;
+    }
 
     /* JWK JSON */
     char jwk[512];
     snprintf(jwk, sizeof(jwk),
         "{\"crv\":\"P-256\",\"kty\":\"EC\",\"x\":\"%s\",\"y\":\"%s\"}",
-        base64url_encode(x_bytes, (size_t)x_len),
-        base64url_encode(y_bytes, (size_t)y_len));
+        x_b64, y_b64);
+    free(x_b64);
+    free(y_b64);
 
     /* SHA-256 */
     unsigned char hash[SHA256_DIGEST_LENGTH];

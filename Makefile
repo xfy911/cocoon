@@ -20,7 +20,7 @@ PREFIX ?= /usr/local
 BINDIR = $(PREFIX)/bin
 
 # 源文件
-SRCS = main.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c platform.c middleware.c plugin.c proxy.c proxy_tls.c healthcheck.c middleware_ext.c load_balance.c grpc.c http3.c sse.c fastcgi.c fcgi_handler.c cache.c
+SRCS = main.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c platform.c middleware.c plugin.c proxy.c proxy_tls.c healthcheck.c middleware_ext.c load_balance.c grpc.c http3.c sse.c fastcgi.c fcgi_handler.c cache.c dashboard.c
 OBJS = $(SRCS:.c=.o)
 TARGET = cocoon
 
@@ -90,8 +90,8 @@ unit-test: $(UNIT_TEST_BINS)
 	fi
 
 # 单元测试编译规则
-$(UNIT_TEST_DIR)/test_server: $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c platform.c middleware.c plugin.c proxy.c proxy_tls.c healthcheck.c sse.c fastcgi.c fcgi_handler.c cache.c $(UNITY_SRC)
-	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c platform.c middleware.c plugin.c proxy.c proxy_tls.c healthcheck.c sse.c fastcgi.c fcgi_handler.c cache.c $(UNITY_SRC) $(LDFLAGS)
+$(UNIT_TEST_DIR)/test_server: $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c platform.c middleware.c plugin.c proxy.c proxy_tls.c healthcheck.c sse.c fastcgi.c fcgi_handler.c cache.c dashboard.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c platform.c middleware.c plugin.c proxy.c proxy_tls.c healthcheck.c sse.c fastcgi.c fcgi_handler.c cache.c dashboard.c $(UNITY_SRC) $(LDFLAGS)
 
 $(UNIT_TEST_DIR)/test_multipart: $(UNIT_TEST_DIR)/test_multipart.c multipart.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_multipart.c multipart.c $(UNITY_SRC) -lm
@@ -145,6 +145,10 @@ $(UNIT_TEST_DIR)/test_fastcgi: $(UNIT_TEST_DIR)/test_fastcgi.c fastcgi.c log.c $
 # 缓存测试
 $(UNIT_TEST_DIR)/test_cache: $(UNIT_TEST_DIR)/test_cache.c cache.c log.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_cache.c cache.c log.c $(UNITY_SRC) $(LDFLAGS)
+
+# Dashboard 测试
+$(UNIT_TEST_DIR)/test_dashboard: $(UNIT_TEST_DIR)/test_dashboard.c dashboard.c sse.c log.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_dashboard.c dashboard.c sse.c log.c $(UNITY_SRC) $(LDFLAGS)
 
 # 安装
 install: $(TARGET)

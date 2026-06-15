@@ -34,6 +34,7 @@
 #include "config.h"
 #include "fcgi_handler.h"
 #include "cache.h"
+#include "dashboard.h"
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -85,19 +86,19 @@ struct server_context {
     /* 内存缓存 */
     cocoon_cache_t     *cache;        /**< 内存响应缓存（NULL 表示未启用） */
 };
-static atomic_int g_active_connections = 0;
 /* 服务器启动时间 */
-static time_t g_server_start_time = 0;
+time_t g_server_start_time = 0;
 /* 最大连接数（供健康检查端点使用） */
-static uint32_t g_max_connections = 0;
+uint32_t g_max_connections = 0;
 /* Prometheus 指标计数器 */
-static atomic_uint g_total_requests = 0;
-static atomic_uint g_response_2xx = 0;
-static atomic_uint g_response_3xx = 0;
-static atomic_uint g_response_4xx = 0;
-static atomic_uint g_response_5xx = 0;
-static atomic_uint g_response_200 = 0;
-static atomic_uint g_response_404 = 0;
+atomic_int g_active_connections = 0;
+atomic_uint g_total_requests = 0;
+atomic_uint g_response_2xx = 0;
+atomic_uint g_response_3xx = 0;
+atomic_uint g_response_4xx = 0;
+atomic_uint g_response_5xx = 0;
+atomic_uint g_response_200 = 0;
+atomic_uint g_response_404 = 0;
 
 /**
  * update_metrics - 更新 Prometheus 指标计数器
@@ -471,6 +472,26 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
             http_request_free(&req);
             return req.keep_alive;
         }
+    }
+
+    /* Dashboard SSE 端点（必须在 /_status 之前检查） */
+    if (dashboard_sse_handle_request(conn->fd, &req)) {
+        conn->response_status = 200;
+        update_metrics(conn->response_status);
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, -1);
+        http_request_free(&req);
+        return true; /* SSE 保持连接 */
+    }
+
+    /* Dashboard 页面端点 */
+    if (dashboard_handle_request(conn->fd, &req)) {
+        conn->response_status = 200;
+        update_metrics(conn->response_status);
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, -1);
+        http_request_free(&req);
+        return req.keep_alive;
     }
 
     /* SSE 端点 */

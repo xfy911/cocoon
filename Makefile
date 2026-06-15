@@ -6,8 +6,8 @@ COCO_INCLUDE ?= $(COCO_DIR)/include
 COCO_LIB     ?= $(COCO_DIR)/build
 
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -std=c11 -D_GNU_SOURCE -I$(COCO_INCLUDE)
-LDFLAGS = -L$(COCO_LIB) -lcoco -lpthread -lm -luring -lz -lbrotlienc -lssl -lcrypto -lnghttp2 -ldl
+CFLAGS = -Wall -Wextra -O2 -std=c11 -D_GNU_SOURCE -I$(COCO_INCLUDE) -I/usr/include/x86_64-linux-gnu
+LDFLAGS = -L$(COCO_LIB) -lcoco -lpthread -lm -luring -lz -lbrotlienc -lssl -lcrypto -lnghttp2 -ldl -lcurl
 
 # 调试模式
 DEBUG ?= 0
@@ -20,7 +20,7 @@ PREFIX ?= /usr/local
 BINDIR = $(PREFIX)/bin
 
 # 源文件
-SRCS = main.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c platform.c middleware.c plugin.c proxy.c proxy_tls.c healthcheck.c middleware_ext.c load_balance.c grpc.c http3.c sse.c fastcgi.c fcgi_handler.c cache.c dashboard.c
+SRCS = main.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c platform.c middleware.c plugin.c proxy.c proxy_tls.c healthcheck.c middleware_ext.c load_balance.c grpc.c http3.c sse.c fastcgi.c fcgi_handler.c cache.c dashboard.c acme.c
 OBJS = $(SRCS:.c=.o)
 TARGET = cocoon
 
@@ -90,8 +90,8 @@ unit-test: $(UNIT_TEST_BINS)
 	fi
 
 # 单元测试编译规则
-$(UNIT_TEST_DIR)/test_server: $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c platform.c middleware.c plugin.c proxy.c proxy_tls.c healthcheck.c sse.c fastcgi.c fcgi_handler.c cache.c dashboard.c $(UNITY_SRC)
-	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c platform.c middleware.c plugin.c proxy.c proxy_tls.c healthcheck.c sse.c fastcgi.c fcgi_handler.c cache.c dashboard.c $(UNITY_SRC) $(LDFLAGS)
+$(UNIT_TEST_DIR)/test_server: $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c platform.c middleware.c plugin.c proxy.c proxy_tls.c healthcheck.c sse.c fastcgi.c fcgi_handler.c cache.c dashboard.c acme.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_server.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c platform.c middleware.c plugin.c proxy.c proxy_tls.c healthcheck.c sse.c fastcgi.c fcgi_handler.c cache.c dashboard.c acme.c $(UNITY_SRC) $(LDFLAGS)
 
 $(UNIT_TEST_DIR)/test_multipart: $(UNIT_TEST_DIR)/test_multipart.c multipart.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_multipart.c multipart.c $(UNITY_SRC) -lm
@@ -99,8 +99,8 @@ $(UNIT_TEST_DIR)/test_multipart: $(UNIT_TEST_DIR)/test_multipart.c multipart.c $
 $(UNIT_TEST_DIR)/test_http: $(UNIT_TEST_DIR)/test_http.c http.c log.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_http.c http.c log.c $(UNITY_SRC) -lm
 
-$(UNIT_TEST_DIR)/test_static: $(UNIT_TEST_DIR)/test_static.c http.c log.c tls.c access_log.c platform.c cache.c $(UNITY_SRC)
-	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_static.c http.c log.c tls.c access_log.c platform.c cache.c $(UNITY_SRC) $(LDFLAGS)
+$(UNIT_TEST_DIR)/test_static: $(UNIT_TEST_DIR)/test_static.c http.c log.c tls.c access_log.c platform.c cache.c acme.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_static.c http.c log.c tls.c access_log.c platform.c cache.c acme.c $(UNITY_SRC) $(LDFLAGS)
 
 $(UNIT_TEST_DIR)/test_websocket: $(UNIT_TEST_DIR)/test_websocket.c websocket.c log.c platform.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_websocket.c websocket.c log.c platform.c $(UNITY_SRC) $(LDFLAGS)
@@ -149,6 +149,10 @@ $(UNIT_TEST_DIR)/test_cache: $(UNIT_TEST_DIR)/test_cache.c cache.c log.c $(UNITY
 # Dashboard 测试
 $(UNIT_TEST_DIR)/test_dashboard: $(UNIT_TEST_DIR)/test_dashboard.c dashboard.c sse.c log.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_dashboard.c dashboard.c sse.c log.c $(UNITY_SRC) $(LDFLAGS)
+
+# ACME 测试
+$(UNIT_TEST_DIR)/test_acme: $(UNIT_TEST_DIR)/test_acme.c acme.c log.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_acme.c acme.c log.c $(UNITY_SRC) $(LDFLAGS)
 
 # 安装
 install: $(TARGET)

@@ -168,7 +168,24 @@ clean:
 	rm -f $(OBJS) $(TARGET)
 	rm -f $(UNIT_TEST_OBJS) $(UNIT_TEST_BINS)
 
+# 安装 systemd 服务文件
+install-systemd: cocoon.service
+	install -d /etc/cocoon
+	install -d /var/log/cocoon
+	install -d /var/www
+	install -m 644 cocoon.service /etc/systemd/system/
+	@echo "[Cocoon] systemd 服务已安装"
+	@echo "  1. 编辑 /etc/cocoon/cocoon.json 配置服务器"
+	@echo "  2. 运行 'systemctl daemon-reload' 重新加载 systemd"
+	@echo "  3. 运行 'systemctl enable --now cocoon' 启动并启用服务"
+
+# 卸载 systemd 服务
+uninstall-systemd:
+	systemctl disable cocoon 2>/dev/null || true
+	rm -f /etc/systemd/system/cocoon.service
+	@echo "[Cocoon] systemd 服务已卸载"
+
 # 重新构建
 rebuild: clean all
 
-.PHONY: all clean install uninstall rebuild deps build-all test integration-test test-all bench unit-test
+.PHONY: all clean install uninstall rebuild deps build-all test integration-test test-all bench unit-test install-systemd uninstall-systemd

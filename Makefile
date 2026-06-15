@@ -20,7 +20,7 @@ PREFIX ?= /usr/local
 BINDIR = $(PREFIX)/bin
 
 # 源文件
-SRCS = main.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c platform.c middleware.c plugin.c proxy.c proxy_tls.c healthcheck.c middleware_ext.c load_balance.c grpc.c http3.c sse.c
+SRCS = main.c server.c http.c static.c log.c config.c multipart.c tls.c http2.c access_log.c websocket.c platform.c middleware.c plugin.c proxy.c proxy_tls.c healthcheck.c middleware_ext.c load_balance.c grpc.c http3.c sse.c fastcgi.c
 OBJS = $(SRCS:.c=.o)
 TARGET = cocoon
 
@@ -137,6 +137,10 @@ $(UNIT_TEST_DIR)/test_http3: $(UNIT_TEST_DIR)/test_http3.c http3.c http.c log.c 
 # SSE 测试
 $(UNIT_TEST_DIR)/test_sse: $(UNIT_TEST_DIR)/test_sse.c sse.c log.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_sse.c sse.c log.c $(UNITY_SRC) $(LDFLAGS)
+
+# FastCGI 测试
+$(UNIT_TEST_DIR)/test_fastcgi: $(UNIT_TEST_DIR)/test_fastcgi.c fastcgi.c log.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_fastcgi.c fastcgi.c log.c $(UNITY_SRC) $(LDFLAGS)
 
 # 安装
 install: $(TARGET)

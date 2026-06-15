@@ -100,7 +100,186 @@ void test_load_null_args(void) {
     TEST_ASSERT_FALSE(config_load_from_file("/tmp/x", NULL));
 }
 
-/* ===== config_merge ===== */
+/* ===== config_validate ===== */
+
+void test_validate_null_config(void) {
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(NULL, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "NULL"));
+}
+
+void test_validate_valid_default(void) {
+    cocoon_config_t cfg = {0};
+    cfg.port = 8080;
+    cfg.log_level = LOG_LEVEL_INFO;
+    TEST_ASSERT_TRUE(config_validate(&cfg, NULL, 0));
+}
+
+void test_validate_port_zero(void) {
+    cocoon_config_t cfg = {.port = 0, .log_level = LOG_LEVEL_INFO};
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(&cfg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "port"));
+}
+
+void test_validate_port_max(void) {
+    cocoon_config_t cfg = {.port = 65535, .log_level = LOG_LEVEL_INFO};
+    TEST_ASSERT_TRUE(config_validate(&cfg, NULL, 0));
+}
+
+void test_validate_workers_too_high(void) {
+    cocoon_config_t cfg = {.port = 8080, .log_level = LOG_LEVEL_INFO, .num_workers = 1025};
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(&cfg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "workers"));
+}
+
+void test_validate_max_conn_too_high(void) {
+    cocoon_config_t cfg = {.port = 8080, .log_level = LOG_LEVEL_INFO, .max_connections = 100001};
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(&cfg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "connections"));
+}
+
+void test_validate_timeout_too_short(void) {
+    cocoon_config_t cfg = {.port = 8080, .log_level = LOG_LEVEL_INFO, .timeout_ms = 50};
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(&cfg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "timeout"));
+}
+
+void test_validate_timeout_too_long(void) {
+    cocoon_config_t cfg = {.port = 8080, .log_level = LOG_LEVEL_INFO, .timeout_ms = 3600001};
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(&cfg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "timeout"));
+}
+
+void test_validate_log_level_invalid(void) {
+    cocoon_config_t cfg = {.port = 8080, .log_level = 99};
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(&cfg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "log_level"));
+}
+
+void test_validate_empty_root_dir(void) {
+    cocoon_config_t cfg = {.port = 8080, .log_level = LOG_LEVEL_INFO, .root_dir = ""};
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(&cfg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "root_dir"));
+}
+
+void test_validate_tls_mismatch_cert_only(void) {
+    cocoon_config_t cfg = {.port = 8080, .log_level = LOG_LEVEL_INFO, .tls_cert = "/cert.pem"};
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(&cfg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "TLS"));
+}
+
+void test_validate_tls_mismatch_key_only(void) {
+    cocoon_config_t cfg = {.port = 8080, .log_level = LOG_LEVEL_INFO, .tls_key = "/key.pem"};
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(&cfg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "TLS"));
+}
+
+void test_validate_tls_both_set(void) {
+    cocoon_config_t cfg = {.port = 8080, .log_level = LOG_LEVEL_INFO, .tls_cert = "/cert.pem", .tls_key = "/key.pem"};
+    TEST_ASSERT_TRUE(config_validate(&cfg, NULL, 0));
+}
+
+void test_validate_auth_mismatch_user_only(void) {
+    cocoon_config_t cfg = {.port = 8080, .log_level = LOG_LEVEL_INFO, .auth_user = "admin"};
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(&cfg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "Auth"));
+}
+
+void test_validate_proxy_empty_prefix(void) {
+    cocoon_config_t cfg = {.port = 8080, .log_level = LOG_LEVEL_INFO, .num_proxies = 1};
+    strcpy(cfg.proxies[0].prefix, "");
+    strcpy(cfg.proxies[0].target, "http://localhost:3000");
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(&cfg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "proxy"));
+}
+
+void test_validate_proxy_empty_target(void) {
+    cocoon_config_t cfg = {.port = 8080, .log_level = LOG_LEVEL_INFO, .num_proxies = 1};
+    strcpy(cfg.proxies[0].prefix, "/api");
+    strcpy(cfg.proxies[0].target, "");
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(&cfg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "proxy"));
+}
+
+void test_validate_proxy_pool_too_large(void) {
+    cocoon_config_t cfg = {.port = 8080, .log_level = LOG_LEVEL_INFO, .num_proxies = 1};
+    strcpy(cfg.proxies[0].prefix, "/api");
+    strcpy(cfg.proxies[0].target, "http://localhost:3000");
+    cfg.proxies[0].pool_size = 17;
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(&cfg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "pool_size"));
+}
+
+void test_validate_vhost_empty_name(void) {
+    cocoon_config_t cfg = {.port = 8080, .log_level = LOG_LEVEL_INFO, .num_vhosts = 1};
+    strcpy(cfg.vhosts[0].server_name, "");
+    strcpy(cfg.vhosts[0].root_dir, "/var/www");
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(&cfg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "vhost"));
+}
+
+void test_validate_fastcgi_empty_prefix(void) {
+    cocoon_config_t cfg = {.port = 8080, .log_level = LOG_LEVEL_INFO, .num_fastcgi = 1};
+    strcpy(cfg.fastcgi[0].prefix, "");
+    strcpy(cfg.fastcgi[0].host, "127.0.0.1");
+    cfg.fastcgi[0].port = 9000;
+    cfg.fastcgi[0].pool_size = 4;
+    cfg.fastcgi[0].timeout_ms = 30000;
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(&cfg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "fastcgi"));
+}
+
+void test_validate_fastcgi_invalid_port(void) {
+    cocoon_config_t cfg = {.port = 8080, .log_level = LOG_LEVEL_INFO, .num_fastcgi = 1};
+    strcpy(cfg.fastcgi[0].prefix, "/php");
+    strcpy(cfg.fastcgi[0].host, "127.0.0.1");
+    cfg.fastcgi[0].port = 0;
+    cfg.fastcgi[0].pool_size = 4;
+    cfg.fastcgi[0].timeout_ms = 30000;
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(&cfg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "fastcgi"));
+}
+
+void test_validate_fastcgi_pool_too_large(void) {
+    cocoon_config_t cfg = {.port = 8080, .log_level = LOG_LEVEL_INFO, .num_fastcgi = 1};
+    strcpy(cfg.fastcgi[0].prefix, "/php");
+    strcpy(cfg.fastcgi[0].host, "127.0.0.1");
+    cfg.fastcgi[0].port = 9000;
+    cfg.fastcgi[0].pool_size = 17;
+    cfg.fastcgi[0].timeout_ms = 30000;
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(&cfg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "fastcgi"));
+}
+
+void test_validate_rate_limit_too_high(void) {
+    cocoon_config_t cfg = {.port = 8080, .log_level = LOG_LEVEL_INFO, .rate_limit = 100001};
+    char err[256];
+    TEST_ASSERT_FALSE(config_validate(&cfg, err, sizeof(err)));
+    TEST_ASSERT_NOT_NULL(strstr(err, "rate_limit"));
+}
+
+void test_validate_no_err_buf(void) {
+    cocoon_config_t cfg = {.port = 0, .log_level = LOG_LEVEL_INFO};
+    TEST_ASSERT_FALSE(config_validate(&cfg, NULL, 0));
+}
+
 
 void test_merge_override_all(void) {
     cocoon_config_t base = {
@@ -390,5 +569,30 @@ int main(void) {
     RUN_TEST(test_load_plugins_string);
     RUN_TEST(test_load_plugins_array);
     RUN_TEST(test_load_plugins_array_multiple);
+
+    /* config_validate */
+    RUN_TEST(test_validate_null_config);
+    RUN_TEST(test_validate_valid_default);
+    RUN_TEST(test_validate_port_zero);
+    RUN_TEST(test_validate_port_max);
+    RUN_TEST(test_validate_workers_too_high);
+    RUN_TEST(test_validate_max_conn_too_high);
+    RUN_TEST(test_validate_timeout_too_short);
+    RUN_TEST(test_validate_timeout_too_long);
+    RUN_TEST(test_validate_log_level_invalid);
+    RUN_TEST(test_validate_empty_root_dir);
+    RUN_TEST(test_validate_tls_mismatch_cert_only);
+    RUN_TEST(test_validate_tls_mismatch_key_only);
+    RUN_TEST(test_validate_tls_both_set);
+    RUN_TEST(test_validate_auth_mismatch_user_only);
+    RUN_TEST(test_validate_proxy_empty_prefix);
+    RUN_TEST(test_validate_proxy_empty_target);
+    RUN_TEST(test_validate_proxy_pool_too_large);
+    RUN_TEST(test_validate_vhost_empty_name);
+    RUN_TEST(test_validate_fastcgi_empty_prefix);
+    RUN_TEST(test_validate_fastcgi_invalid_port);
+    RUN_TEST(test_validate_fastcgi_pool_too_large);
+    RUN_TEST(test_validate_rate_limit_too_high);
+    RUN_TEST(test_validate_no_err_buf);
     return UNITY_END();
 }

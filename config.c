@@ -654,9 +654,158 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
 }
 
 /**
- * config_merge - 将命令行参数合并到基础配置
+ * config_validate - 校验配置是否合法
  *
- * 命令行显式指定的值覆盖配置文件中的值。
+ * 在热重载前调用，确保新配置不会导致服务异常。
+ * 校验失败时返回 false 并写入错误信息到 err_buf。
+ *
+ * @param config 待校验的配置
+ * @param err_buf 错误信息缓冲区（可为 NULL）
+ * @param err_size 缓冲区大小
+ * @return true 合法，false 不合法
+ */
+bool config_validate(const cocoon_config_t *config, char *err_buf, size_t err_size) {
+    if (!config) {
+        if (err_buf && err_size > 0) {
+            snprintf(err_buf, err_size, "配置指针为 NULL");
+        }
+        return false;
+    }
+
+#define SET_ERR(msg) do { if (err_buf && err_size > 0) snprintf(err_buf, err_size, "%s", msg); } while(0)
+
+    /* 端口校验 */
+    if (config->port == 0) {
+        SET_ERR("port 不能为 0");
+        return false;
+    }
+
+    /* 工作线程数 */
+    if (config->num_workers > 1024) {
+        SET_ERR("num_workers 不能超过 1024");
+        return false;
+    }
+
+    /* 最大连接数 */
+    if (config->max_connections > 100000) {
+        SET_ERR("max_connections 不能超过 100000");
+        return false;
+    }
+
+    /* 超时时间 */
+    if (config->timeout_ms > 0 && config->timeout_ms < 100) {
+        SET_ERR("timeout_ms 如果设置则必须 >= 100ms");
+        return false;
+    }
+    if (config->timeout_ms > 3600000) {
+        SET_ERR("timeout_ms 不能超过 1 小时（3600000ms）");
+        return false;
+    }
+
+    /* 日志级别 */
+    if (config->log_level > LOG_LEVEL_DEBUG) {
+        SET_ERR("log_level 无效，必须在 0-3 之间");
+        return false;
+    }
+
+    /* 根目录 */
+    if (config->root_dir && config->root_dir[0] == '\0') {
+        SET_ERR("root_dir 不能为空字符串");
+        return false;
+    }
+
+    /* TLS 证书和密钥必须成对出现 */
+    if ((config->tls_cert && !config->tls_key) || (!config->tls_cert && config->tls_key)) {
+        SET_ERR("TLS 证书和私钥必须同时配置或同时留空");
+        return false;
+    }
+
+    /* 访问日志路径 */
+    if (config->access_log_path && config->access_log_path[0] == '\0') {
+        SET_ERR("access_log_path 不能为空字符串");
+        return false;
+    }
+
+    /* Basic Auth 用户名密码成对 */
+    if ((config->auth_user && !config->auth_pass) || (!config->auth_user && config->auth_pass)) {
+        SET_ERR("Basic Auth 用户名和密码必须同时配置");
+        return false;
+    }
+
+    /* 代理规则校验 */
+    for (size_t i = 0; i < config->num_proxies; i++) {
+        if (config->proxies[i].prefix[0] == '\0') {
+            SET_ERR("proxy 前缀不能为空");
+            return false;
+        }
+        if (config->proxies[i].target[0] == '\0') {
+            SET_ERR("proxy 目标不能为空");
+            return false;
+        }
+        if (config->proxies[i].pool_size > 16) {
+            SET_ERR("proxy pool_size 不能超过 16");
+            return false;
+        }
+    }
+
+    /* 虚拟主机校验 */
+    for (size_t i = 0; i < config->num_vhosts; i++) {
+        if (config->vhosts[i].server_name[0] == '\0') {
+            SET_ERR("vhost 域名不能为空");
+            return false;
+        }
+        if (config->vhosts[i].root_dir[0] == '\0') {
+            SET_ERR("vhost 根目录不能为空");
+            return false;
+        }
+    }
+
+    /* FastCGI 规则校验 */
+    for (size_t i = 0; i < config->num_fastcgi; i++) {
+        if (config->fastcgi[i].prefix[0] == '\0') {
+            SET_ERR("fastcgi 前缀不能为空");
+            return false;
+        }
+        if (config->fastcgi[i].host[0] == '\0') {
+            SET_ERR("fastcgi 主机不能为空");
+            return false;
+        }
+        if (!config->fastcgi[i].is_unix_socket) {
+            if (config->fastcgi[i].port <= 0 || config->fastcgi[i].port > 65535) {
+                SET_ERR("fastcgi TCP 端口必须在 1-65535 之间");
+                return false;
+            }
+        }
+        if (config->fastcgi[i].pool_size < 1 || config->fastcgi[i].pool_size > 16) {
+            SET_ERR("fastcgi pool_size 必须在 1-16 之间");
+            return false;
+        }
+        if (config->fastcgi[i].timeout_ms < 1000 || config->fastcgi[i].timeout_ms > 3600000) {
+            SET_ERR("fastcgi timeout_ms 必须在 1000-3600000 之间");
+            return false;
+        }
+    }
+
+    /* 速率限制 */
+    if (config->rate_limit > 100000) {
+        SET_ERR("rate_limit 不能超过 100000");
+        return false;
+    }
+
+    /* 插件路径 */
+    for (size_t i = 0; i < config->num_plugins; i++) {
+        if (config->plugins[i] == NULL || config->plugins[i][0] == '\0') {
+            SET_ERR("plugin 路径不能为空");
+            return false;
+        }
+    }
+
+#undef SET_ERR
+    return true;
+}
+
+/**
+ * config_merge - 将命令行参数合并到基础配置
  * 对于字符串字段，会释放旧值并复制新值。
  *
  * @param base 基础配置（通常来自配置文件）

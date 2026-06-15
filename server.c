@@ -1494,6 +1494,25 @@ void server_reload_config(server_context_t *ctx) {
         return;
     }
 
+    /* 校验新配置 */
+    char err_buf[256] = {0};
+    if (!config_validate(&new_config, err_buf, sizeof(err_buf))) {
+        log_error("配置热重载被拒绝：新配置校验失败 — %s", err_buf);
+        /* 清理 new_config 分配的内存 */
+        if (new_config.root_dir) free((void*)new_config.root_dir);
+        if (new_config.tls_cert) free((void*)new_config.tls_cert);
+        if (new_config.tls_key) free((void*)new_config.tls_key);
+        if (new_config.access_log_path) free((void*)new_config.access_log_path);
+        if (new_config.auth_user) free((void*)new_config.auth_user);
+        if (new_config.auth_pass) free((void*)new_config.auth_pass);
+        for (size_t i = 0; i < new_config.num_plugins; i++) {
+            free((void*)new_config.plugins[i]);
+        }
+        return;
+    }
+
+    log_info("配置热重载：新配置校验通过");
+
     /* 检查不可热重载项 */
     if (new_config.port != ctx->config.port) {
         log_warn("端口变化（%d -> %d）需要重启才能生效", ctx->config.port, new_config.port);

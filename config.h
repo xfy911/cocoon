@@ -26,6 +26,19 @@
 bool config_load_from_file(const char *path, cocoon_config_t *config);
 
 /**
+ * config_validate - 校验配置是否合法
+ *
+ * 在热重载前调用，确保新配置不会导致服务异常。
+ * 校验失败时返回 false 并写入错误信息到 err_buf。
+ *
+ * @param config 待校验的配置
+ * @param err_buf 错误信息缓冲区（可为 NULL）
+ * @param err_size 缓冲区大小
+ * @return true 合法，false 不合法
+ */
+bool config_validate(const cocoon_config_t *config, char *err_buf, size_t err_size);
+
+/**
  * config_merge - 用命令行配置覆盖文件配置
  *
  * 优先级：命令行 > 配置文件 > 硬编码默认值

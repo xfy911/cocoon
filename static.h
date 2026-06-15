@@ -9,6 +9,7 @@
 
 #include "http.h"
 #include <stdbool.h>
+#include "cache.h"
 
 /**
  * send_all - 确保缓冲区全部发送
@@ -29,14 +30,18 @@ int send_all(int fd, const char *buf, size_t len);
  * 打开文件，根据请求判断是否需要发送部分内容（Range），
  * 然后通过 sendfile 或循环读取发送文件内容。
  *
+ * 如果 cache 不为 NULL，且文件大小不超过缓存上限，
+ * 则尝试读取完整文件内容到内存缓存，避免重复磁盘 I/O。
+ *
  * @param fd 客户端 socket 文件描述符
  * @param req HTTP 请求
  * @param root_dir 静态资源根目录
  * @param gzip_enabled 是否启用 gzip 压缩
  * @param brotli_enabled 是否启用 brotli 压缩
+ * @param cache 内存缓存实例（可为 NULL）
  * @return COCOON_OK 成功，负值错误码
  */
-int static_serve_file(int fd, const http_request_t *req, const char *root_dir, bool gzip_enabled, bool brotli_enabled);
+int static_serve_file(int fd, const http_request_t *req, const char *root_dir, bool gzip_enabled, bool brotli_enabled, cocoon_cache_t *cache);
 
 /**
  * static_serve_directory - 生成目录列表 HTML

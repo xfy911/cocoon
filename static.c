@@ -11,6 +11,7 @@
 #include "static.h"
 #include "cocoon.h"
 #include "platform.h"
+#include "cache.h"
 #include "../coco/include/coco.h"
 #include "tls.h"
 #include <stdio.h>
@@ -332,7 +333,7 @@ int static_send_error(int fd, int status_code, bool keep_alive) {
  * @param root_dir 闈欐€佽祫婧愭牴鐩綍
  * @return COCOON_OK 鎴愬姛锛岃礋鍊奸敊璇爜
  */
-int static_serve_file(int fd, const http_request_t *req, const char *root_dir, bool gzip_enabled, bool brotli_enabled) {
+int static_serve_file(int fd, const http_request_t *req, const char *root_dir, bool gzip_enabled, bool brotli_enabled, cocoon_cache_t *cache) {
     char real_path[4096];
     if (!safe_path_join(real_path, sizeof(real_path), root_dir, req->path)) {
         return static_send_error(fd, 403, req->keep_alive);
@@ -398,6 +399,19 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir, b
 
     /* 鍒ゆ柇鍘嬬缉鏂瑰紡锛氫紭鍏?brotli锛屽洖閫€ gzip */
     int64_t file_size = cocoon_stat_size(&st);
+
+    /* 鍐呭瓨缂撳瓨妫€鏌?*/
+    bool cache_eligible = cache && !req->has_range && req->method != HTTP_HEAD && cache_is_eligible(cache, file_size);
+    if (cache_eligible) {
+        const cocoon_cache_entry_t *cached = cache_get(cache, real_path, cocoon_stat_mtime(&st));
+        if (cached) {
+            send_all(fd, cached->header, cached->header_len);
+            send_all(fd, cached->body, cached->body_len);
+            cocoon_file_close(file_fd);
+            return COCOON_OK;
+        }
+    }
+
     bool use_gzip = false;
     bool use_brotli = false;
     char *compress_buf = NULL;
@@ -494,23 +508,34 @@ int static_serve_file(int fd, const http_request_t *req, const char *root_dir, b
         return COCOON_OK;
     }
 
-    if (use_gzip || use_brotli || tls_has_connection(fd)) {
+    if (use_gzip || use_brotli || tls_has_connection(fd) || cache_eligible) {
         /* 发送压缩后的数据，或 TLS 模式下的文件内容 */
         if (use_gzip || use_brotli) {
             send_all(fd, compress_buf, (size_t)compress_len);
+            /* 缓存压缩后的内容 */
+            if (cache_eligible) {
+                cache_put(cache, real_path, header_buf, (size_t)header_len, compress_buf, (size_t)compress_len, cocoon_stat_mtime(&st));
+            }
             free(compress_buf);
         } else {
-            /* 定位到起始位置（文件可能已被压缩读取提前读至末尾） */
+            /* 读取文件内容到内存后发送（TLS 或缓存路径） */
             cocoon_file_seek(file_fd, send_start, SEEK_SET);
-            /* TLS 模式：不能使用 sendfile，需读取文件后发送 */
-            char file_buf[65536];
-            ssize_t remaining = send_length;
-            while (remaining > 0) {
-                size_t to_read = (size_t)remaining < sizeof(file_buf) ? (size_t)remaining : sizeof(file_buf);
-                ssize_t n = cocoon_file_read(file_fd, file_buf, to_read);
-                if (n <= 0) break;
-                if (send_all(fd, file_buf, (size_t)n) != 0) break;
-                remaining -= n;
+            char *file_buf = (char *)malloc((size_t)file_size);
+            if (file_buf) {
+                ssize_t read_total = 0;
+                while (read_total < file_size) {
+                    ssize_t n = cocoon_file_read(file_fd, file_buf + read_total, (size_t)(file_size - read_total));
+                    if (n <= 0) break;
+                    read_total += n;
+                }
+                if (read_total == file_size) {
+                    send_all(fd, file_buf, (size_t)file_size);
+                    /* 缓存存储 */
+                    if (cache_eligible) {
+                        cache_put(cache, real_path, header_buf, (size_t)header_len, file_buf, (size_t)file_size, cocoon_stat_mtime(&st));
+                    }
+                }
+                free(file_buf);
             }
         }
         cocoon_file_close(file_fd);

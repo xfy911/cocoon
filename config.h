@@ -61,6 +61,8 @@ void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
                   bool has_access_log,
                   bool has_cors_enabled, bool has_auth_user, bool has_auth_pass,
                   bool has_rate_limit,
-                  bool has_plugins);
+                  bool has_plugins,
+                  bool has_cache_enabled, bool has_cache_max_size,
+                  bool has_cache_ttl_seconds, bool has_cache_max_entry_size);
 
 #endif /* COCOON_CONFIG_H */

@@ -33,6 +33,7 @@
 #include "sse.h"
 #include "config.h"
 #include "fcgi_handler.h"
+#include "cache.h"
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,6 +82,8 @@ struct server_context {
     /* FastCGI 配置 */
     cocoon_fcgi_config_t fcgi_config;
     volatile int        reload_requested; /**< 配置热重载请求标志 */
+    /* 内存缓存 */
+    cocoon_cache_t     *cache;        /**< 内存响应缓存（NULL 表示未启用） */
 };
 static atomic_int g_active_connections = 0;
 /* 服务器启动时间 */
@@ -770,7 +773,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
                 return req.keep_alive;
             }
             conn->response_status = 200;
-            static_serve_file(conn->fd, &index_req, effective_root_dir, conn->gzip_enabled, conn->brotli_enabled);
+            static_serve_file(conn->fd, &index_req, effective_root_dir, conn->gzip_enabled, conn->brotli_enabled, conn->ctx->cache);
         } else {
             /* 无 index.html，生成目录列表 */
             conn->response_status = 200;
@@ -779,7 +782,7 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
     } else if (cocoon_stat_isreg(&st)) {
         /* 普通文件 */
         conn->response_status = 200;
-        static_serve_file(conn->fd, &req, effective_root_dir, conn->gzip_enabled, conn->brotli_enabled);
+        static_serve_file(conn->fd, &req, effective_root_dir, conn->gzip_enabled, conn->brotli_enabled, conn->ctx->cache);
     } else {
         conn->response_status = 403;
         static_send_error(conn->fd, 403, req.keep_alive);
@@ -1393,6 +1396,17 @@ server_context_t *server_create(const cocoon_config_t *config, const char *confi
         log_warn("FastCGI 初始化失败，FastCGI 路由不可用");
     }
 
+    /* 初始化内存缓存 */
+    if (ctx->config.cache_enabled) {
+        ctx->cache = cache_create(ctx->config.cache_max_size, ctx->config.cache_ttl_seconds, ctx->config.cache_max_entry_size);
+        if (ctx->cache) {
+            log_info("内存缓存已启用: 最大 %zu 字节, TTL %u 秒, 单条上限 %zu 字节",
+                     ctx->config.cache_max_size, ctx->config.cache_ttl_seconds, ctx->config.cache_max_entry_size);
+        } else {
+            log_warn("内存缓存初始化失败，已禁用");
+        }
+    }
+
     /* 启动主动健康检查 */
     healthcheck_manager_init(&ctx->hc_manager);
     healthcheck_start(&ctx->hc_manager, &ctx->proxy_config, ctx->config.timeout_ms);
@@ -1630,6 +1644,12 @@ void server_destroy(server_context_t *ctx) {
 
     /* 关闭 FastCGI 连接池 */
     fcgi_handler_destroy(&ctx->fcgi_config);
+
+    /* 销毁内存缓存 */
+    if (ctx->cache) {
+        cache_destroy(ctx->cache);
+        ctx->cache = NULL;
+    }
 
     /* 卸载插件 */
     cocoon_plugin_unload_all();

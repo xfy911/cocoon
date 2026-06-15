@@ -97,6 +97,11 @@ typedef struct cocoon_config {
         int timeout_ms;        /**< 请求超时 */
     } fastcgi[COCOON_MAX_FASTCGI_RULES];
     size_t num_fastcgi;
+    /* 内存缓存配置 */
+    bool        cache_enabled;       /**< 是否启用内存缓存（默认 false） */
+    size_t      cache_max_size;      /**< 最大缓存总容量（字节，默认 64MB） */
+    uint32_t    cache_ttl_seconds;   /**< 缓存 TTL 秒数（默认 60） */
+    size_t      cache_max_entry_size; /**< 单条缓存最大大小（字节，默认 1MB） */
 } cocoon_config_t;
 
 /* === 服务器生命周期 API === */

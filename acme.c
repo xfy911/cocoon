@@ -928,6 +928,26 @@ int acme_get_thumbprint(acme_ctx_t *ctx, char **out) {
 
 /* ===== 一键签发 ===== */
 
+int acme_get_keyauth(acme_ctx_t *ctx, const char *token, char **out) {
+    char *thumbprint = NULL;
+    if (acme_get_thumbprint(ctx, &thumbprint) < 0) {
+        return -1;
+    }
+
+    size_t len = strlen(token) + 1 + strlen(thumbprint) + 1;
+    *out = (char *)malloc(len);
+    if (!*out) {
+        free(thumbprint);
+        return -1;
+    }
+
+    snprintf(*out, len, "%s.%s", token, thumbprint);
+    free(thumbprint);
+    return 0;
+}
+
+/* ===== 一键签发 ===== */
+
 int acme_issue_certificate(acme_ctx_t *ctx, const char **domains, size_t num_domains,
                            const char *email, char **cert_pem, char **key_pem) {
     *cert_pem = NULL;

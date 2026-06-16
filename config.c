@@ -669,10 +669,8 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
                         }
                         if (prefix[0] && host[0] && config->num_fastcgi < COCOON_MAX_FASTCGI_RULES) {
                             size_t i = config->num_fastcgi;
-                            strncpy(config->fastcgi[i].prefix, prefix, sizeof(config->fastcgi[0].prefix)-1);
-                            config->fastcgi[i].prefix[sizeof(config->fastcgi[0].prefix)-1] = '\0';
-                            strncpy(config->fastcgi[i].host, host, sizeof(config->fastcgi[0].host)-1);
-                            config->fastcgi[i].host[sizeof(config->fastcgi[0].host)-1] = '\0';
+                            snprintf(config->fastcgi[i].prefix, sizeof(config->fastcgi[i].prefix), "%s", prefix);
+                            snprintf(config->fastcgi[i].host, sizeof(config->fastcgi[i].host), "%s", host);
                             config->fastcgi[i].port = port;
                             config->fastcgi[i].is_unix_socket = is_unix;
                             config->fastcgi[i].pool_size = pool_size > 0 ? pool_size : 4;

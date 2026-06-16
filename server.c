@@ -35,6 +35,7 @@
 #include "fcgi_handler.h"
 #include "cache.h"
 #include "dashboard.h"
+#include "acme.h"
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -85,6 +86,8 @@ struct server_context {
     volatile int        reload_requested; /**< 配置热重载请求标志 */
     /* 内存缓存 */
     cocoon_cache_t     *cache;        /**< 内存响应缓存（NULL 表示未启用） */
+    /* ACME 客户端 */
+    acme_ctx_t         *acme;         /**< ACME 上下文（NULL 表示未启用） */
 };
 /* 服务器启动时间 */
 time_t g_server_start_time = 0;
@@ -558,6 +561,43 @@ static bool handle_request(connection_t *conn, const char *root_dir) {
         conn->response_status = 405;
         update_metrics(conn->response_status);
         static_send_error(conn->fd, 405, req.keep_alive);
+        access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                         &req, conn->response_status, -1);
+        http_request_free(&req);
+        return req.keep_alive;
+    }
+
+    /* ACME HTTP-01 挑战端点 */
+    if (strncmp(req.path, "/.well-known/acme-challenge/", 28) == 0) {
+        const char *token = req.path + 28;
+        if (token[0] != '\0' && conn->ctx && conn->ctx->acme) {
+            char *keyauth = NULL;
+            if (acme_get_keyauth(conn->ctx->acme, token, &keyauth) == 0) {
+                size_t len = strlen(keyauth);
+                char header[512];
+                int n = snprintf(header, sizeof(header),
+                    "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: text/plain\r\n"
+                    "Content-Length: %zu\r\n"
+                    "Connection: %s\r\n"
+                    "Server: Cocoon/1.0\r\n"
+                    "\r\n",
+                    len, req.keep_alive ? "keep-alive" : "close");
+                send_all(conn->fd, header, (size_t)n);
+                send_all(conn->fd, keyauth, len);
+                free(keyauth);
+                conn->response_status = 200;
+                update_metrics(conn->response_status);
+                access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
+                                 &req, conn->response_status, (int)len);
+                http_request_free(&req);
+                return req.keep_alive;
+            }
+        }
+        /* token 无效或 ACME 未配置 */
+        conn->response_status = 404;
+        update_metrics(conn->response_status);
+        static_send_error(conn->fd, 404, req.keep_alive);
         access_log_write((struct sockaddr *)&conn->client_addr, conn->addr_len,
                          &req, conn->response_status, -1);
         http_request_free(&req);
@@ -1670,6 +1710,12 @@ void server_destroy(server_context_t *ctx) {
     if (ctx->cache) {
         cache_destroy(ctx->cache);
         ctx->cache = NULL;
+    }
+
+    /* 销毁 ACME 上下文 */
+    if (ctx->acme) {
+        acme_destroy(ctx->acme);
+        ctx->acme = NULL;
     }
 
     /* 卸载插件 */

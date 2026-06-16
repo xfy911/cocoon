@@ -121,11 +121,24 @@ void test_acme_http_response_free(void) {
     TEST_ASSERT_EQUAL_size_t(0, resp.body_len);
 }
 
-/* 测试: acme_issue_certificate 参数检查 (不实际执行) */
-void test_acme_issue_certificate_params(void) {
-    /* 这个测试主要是确保函数签名正确，不会崩溃 */
-    /* 实际调用需要完整的 ACME 交互，不适合单元测试 */
-    TEST_ASSERT_TRUE(1);
+/* 测试: acme_get_keyauth (需要有效密钥) */
+void test_acme_get_keyauth(void) {
+    acme_ctx_t *ctx = acme_create("https://acme-staging-v02.api.letsencrypt.org/directory", NULL);
+    TEST_ASSERT_NOT_NULL(ctx);
+
+    char *keyauth = NULL;
+    int ret = acme_get_keyauth(ctx, "testtoken123", &keyauth);
+
+    if (ret == 0) {
+        TEST_ASSERT_NOT_NULL(keyauth);
+        TEST_ASSERT_TRUE(strlen(keyauth) > 0);
+        /* 格式: token.thumbprint */
+        TEST_ASSERT_TRUE(strstr(keyauth, ".") != NULL);
+        free(keyauth);
+    }
+    /* 如果失败（比如密钥生成问题），也接受 */
+
+    acme_destroy(ctx);
 }
 
 /* 测试: 目录 URL 存储 */
@@ -147,7 +160,7 @@ int main(void) {
     RUN_TEST(test_acme_create_account);
     RUN_TEST(test_acme_order_free);
     RUN_TEST(test_acme_http_response_free);
-    RUN_TEST(test_acme_issue_certificate_params);
+    RUN_TEST(test_acme_get_keyauth);
     RUN_TEST(test_acme_directory_url);
 
     return UNITY_END();

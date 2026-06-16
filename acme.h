@@ -201,6 +201,19 @@ int acme_download_certificate(acme_ctx_t *ctx, const char *cert_url, char **out_
 int acme_get_thumbprint(acme_ctx_t *ctx, char **out);
 
 /**
+ * acme_get_keyauth - 获取 HTTP-01 挑战的 keyAuthorization
+ *
+ * keyAuthorization = token + "." + base64url(JWK thumbprint)
+ * RFC 8555 §8.3
+ *
+ * @param ctx ACME 上下文
+ * @param token 挑战 token
+ * @param out 输出 keyAuthorization（调用者负责 free）
+ * @return 0 成功，-1 失败
+ */
+int acme_get_keyauth(acme_ctx_t *ctx, const char *token, char **out);
+
+/**
  * acme_issue_certificate - 一键签发证书（完整流程）
  *
  * 封装目录发现 → 创建账户 → 创建订单 → 挑战 → 下载证书 的完整流程。

@@ -245,7 +245,9 @@ static void test_acme_config_merge(void) {
                  false, false, false, false, false, false,
                  false, false, false, false, false,
                  false, false, false, false,
+                 false,
                  false, false,
+                 false,
                  false, false, false, false,
                  true); /* has_acme_enabled */
 

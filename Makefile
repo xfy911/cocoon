@@ -102,8 +102,8 @@ $(UNIT_TEST_DIR)/test_http: $(UNIT_TEST_DIR)/test_http.c http.c log.c $(UNITY_SR
 $(UNIT_TEST_DIR)/test_static: $(UNIT_TEST_DIR)/test_static.c http.c log.c tls.c access_log.c platform.c cache.c acme.c throttle.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_static.c http.c log.c tls.c access_log.c platform.c cache.c acme.c throttle.c $(UNITY_SRC) $(LDFLAGS)
 
-$(UNIT_TEST_DIR)/test_websocket: $(UNIT_TEST_DIR)/test_websocket.c websocket.c log.c platform.c $(UNITY_SRC)
-	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_websocket.c websocket.c log.c platform.c $(UNITY_SRC) $(LDFLAGS)
+$(UNIT_TEST_DIR)/test_websocket: $(UNIT_TEST_DIR)/test_websocket.c websocket.c log.c platform.c throttle.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_websocket.c websocket.c log.c platform.c throttle.c $(UNITY_SRC) $(LDFLAGS)
 
 $(UNIT_TEST_DIR)/test_log: $(UNIT_TEST_DIR)/test_log.c log.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_log.c log.c $(UNITY_SRC) -lm
@@ -123,16 +123,16 @@ $(UNIT_TEST_DIR)/test_middleware_ext: $(UNIT_TEST_DIR)/test_middleware_ext.c mid
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_middleware_ext.c middleware_ext.c http.c log.c platform.c throttle.c $(UNITY_SRC) $(LDFLAGS)
 
 # gRPC 测试
-$(UNIT_TEST_DIR)/test_grpc: $(UNIT_TEST_DIR)/test_grpc.c grpc.c http.c log.c platform.c $(UNITY_SRC)
-	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_grpc.c grpc.c http.c log.c platform.c $(UNITY_SRC) -lm
+$(UNIT_TEST_DIR)/test_grpc: $(UNIT_TEST_DIR)/test_grpc.c grpc.c http.c log.c platform.c throttle.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_grpc.c grpc.c http.c log.c platform.c throttle.c $(UNITY_SRC) $(LDFLAGS)
 
 # 负载均衡测试
 $(UNIT_TEST_DIR)/test_load_balance: $(UNIT_TEST_DIR)/test_load_balance.c load_balance.c proxy.c proxy_tls.c http.c log.c platform.c throttle.c $(UNITY_SRC)
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_load_balance.c load_balance.c proxy.c proxy_tls.c http.c log.c platform.c throttle.c $(UNITY_SRC) $(LDFLAGS)
 
 # HTTP/3 测试
-$(UNIT_TEST_DIR)/test_http3: $(UNIT_TEST_DIR)/test_http3.c http3.c http.c log.c platform.c $(UNITY_SRC)
-	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_http3.c http3.c http.c log.c platform.c $(UNITY_SRC) $(LDFLAGS)
+$(UNIT_TEST_DIR)/test_http3: $(UNIT_TEST_DIR)/test_http3.c http3.c http.c log.c platform.c throttle.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_http3.c http3.c http.c log.c platform.c throttle.c $(UNITY_SRC) $(LDFLAGS)
 
 # SSE 测试
 $(UNIT_TEST_DIR)/test_sse: $(UNIT_TEST_DIR)/test_sse.c sse.c log.c $(UNITY_SRC)
@@ -151,8 +151,8 @@ $(UNIT_TEST_DIR)/test_dashboard: $(UNIT_TEST_DIR)/test_dashboard.c dashboard.c s
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_dashboard.c dashboard.c sse.c log.c $(UNITY_SRC) $(LDFLAGS)
 
 # ACME 测试
-$(UNIT_TEST_DIR)/test_acme: $(UNIT_TEST_DIR)/test_acme.c acme.c log.c platform.c $(UNITY_SRC)
-	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_acme.c acme.c log.c platform.c $(UNITY_SRC) $(LDFLAGS)
+$(UNIT_TEST_DIR)/test_acme: $(UNIT_TEST_DIR)/test_acme.c acme.c log.c platform.c throttle.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_acme.c acme.c log.c platform.c throttle.c $(UNITY_SRC) $(LDFLAGS)
 
 # ACME 配置集成测试
 $(UNIT_TEST_DIR)/test_acme_config: $(UNIT_TEST_DIR)/test_acme_config.c config.c acme.c log.c access_log.c http.c platform.c throttle.c $(UNITY_SRC)

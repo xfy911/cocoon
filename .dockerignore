@@ -1,0 +1,35 @@
+# Git
+.git
+.gitignore
+.gitmodules
+
+# 构建产物
+*.o
+*.a
+*.so
+cocoon
+tests/unit/test_*
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# 日志
+*.log
+logs/
+
+# 临时文件
+*.tmp
+*.bak
+
+# Docker 自身
+Dockerfile
+.dockerignore
+
+# 文档
+README.md
+
+# 测试（运行时不需）
+tests/

@@ -102,6 +102,15 @@ typedef struct cocoon_config {
     size_t      cache_max_size;      /**< 最大缓存总容量（字节，默认 64MB） */
     uint32_t    cache_ttl_seconds;   /**< 缓存 TTL 秒数（默认 60） */
     size_t      cache_max_entry_size; /**< 单条缓存最大大小（字节，默认 1MB） */
+    /* ACME 自动证书配置 */
+    bool        acme_enabled;        /**< 是否启用 ACME 自动证书（默认 false） */
+    char        acme_directory_url[512]; /**< ACME 目录 URL（默认 Let's Encrypt 生产环境） */
+    char        acme_email[256];     /**< ACME 账户邮箱 */
+    char        acme_domains[8][256]; /**< 需要签发证书的域名列表 */
+    size_t      acme_num_domains;    /**< 域名数量 */
+    char        acme_cert_path[512]; /**< 证书保存路径 */
+    char        acme_key_path[512];  /**< 私钥保存路径 */
+    uint32_t    acme_renew_days;     /**< 到期前 N 天自动续期（默认 30） */
 } cocoon_config_t;
 
 /* === 服务器生命周期 API === */

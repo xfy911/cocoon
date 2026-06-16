@@ -63,6 +63,7 @@ void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
                   bool has_rate_limit,
                   bool has_plugins,
                   bool has_cache_enabled, bool has_cache_max_size,
-                  bool has_cache_ttl_seconds, bool has_cache_max_entry_size);
+                  bool has_cache_ttl_seconds, bool has_cache_max_entry_size,
+                  bool has_acme_enabled);
 
 #endif /* COCOON_CONFIG_H */

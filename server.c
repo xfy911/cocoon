@@ -1468,11 +1468,123 @@ server_context_t *server_create(const cocoon_config_t *config, const char *confi
         }
     }
 
+    /* 初始化 ACME 自动证书 */
+    if (ctx->config.acme_enabled) {
+        const char *directory_url = ctx->config.acme_directory_url[0] ?
+            ctx->config.acme_directory_url :
+            "https://acme-v02.api.letsencrypt.org/directory";
+
+        /* 检查现有证书是否有效 */
+        int days_left = acme_cert_days_until_expiry(ctx->config.acme_cert_path);
+        if (days_left >= (int)ctx->config.acme_renew_days) {
+            log_info("ACME: 现有证书仍有效（剩余 %d 天），跳过签发", days_left);
+        } else {
+            if (days_left < 0) {
+                log_info("ACME: 证书不存在或已过期，开始签发新证书");
+            } else {
+                log_info("ACME: 证书即将过期（剩余 %d 天，阈值 %u 天），开始续期", days_left, ctx->config.acme_renew_days);
+            }
+
+            ctx->acme = acme_create(directory_url, NULL);
+            if (ctx->acme) {
+                char *cert_pem = NULL;
+                char *key_pem = NULL;
+
+                const char *domains[8];
+                for (size_t i = 0; i < ctx->config.acme_num_domains; i++) {
+                    domains[i] = ctx->config.acme_domains[i];
+                }
+
+                if (acme_issue_certificate(ctx->acme, domains, ctx->config.acme_num_domains,
+                                           ctx->config.acme_email, &cert_pem, &key_pem) == 0) {
+                    if (acme_save_certificate(cert_pem, key_pem,
+                                              ctx->config.acme_cert_path,
+                                              ctx->config.acme_key_path) == 0) {
+                        log_info("ACME: 证书签发并保存成功");
+                    } else {
+                        log_error("ACME: 证书保存失败");
+                    }
+                    free(cert_pem);
+                    free(key_pem);
+                } else {
+                    log_error("ACME: 证书签发失败");
+                }
+                /* ACME 上下文继续保留，用于挑战响应和后续续期 */
+            } else {
+                log_error("ACME: 客户端初始化失败");
+            }
+        }
+    }
+
     /* 启动主动健康检查 */
     healthcheck_manager_init(&ctx->hc_manager);
     healthcheck_start(&ctx->hc_manager, &ctx->proxy_config, ctx->config.timeout_ms);
 
     return ctx;
+}
+
+/**
+ * acme_renewal_coroutine - ACME 证书自动续期后台协程
+ *
+ * 每 24 小时检查一次证书有效期，到期前自动续期。
+ *
+ * @param arg 服务器上下文指针
+ */
+static void acme_renewal_coroutine(void *arg) {
+    server_context_t *ctx = (server_context_t *)arg;
+    if (!ctx || !ctx->config.acme_enabled) return;
+
+    /* 如果 ACME 上下文未创建（证书已存在且有效），创建一个用于续期 */
+    if (!ctx->acme) {
+        const char *directory_url = ctx->config.acme_directory_url[0] ?
+            ctx->config.acme_directory_url :
+            "https://acme-v02.api.letsencrypt.org/directory";
+        ctx->acme = acme_create(directory_url, NULL);
+        if (!ctx->acme) {
+            log_error("ACME 续期: 客户端初始化失败");
+            return;
+        }
+    }
+
+    const uint32_t check_interval_ms = 24 * 60 * 60 * 1000; /* 24 小时 */
+
+    while (ctx->running) {
+        coco_sleep(check_interval_ms);
+        if (!ctx->running) break;
+
+        int days_left = acme_cert_days_until_expiry(ctx->config.acme_cert_path);
+        if (days_left < 0 || days_left < (int)ctx->config.acme_renew_days) {
+            if (days_left < 0) {
+                log_info("ACME 续期: 证书已过期或不存在，开始重新签发");
+            } else {
+                log_info("ACME 续期: 证书即将过期（剩余 %d 天），开始续期", days_left);
+            }
+
+            char *cert_pem = NULL;
+            char *key_pem = NULL;
+            const char *domains[8];
+            for (size_t i = 0; i < ctx->config.acme_num_domains; i++) {
+                domains[i] = ctx->config.acme_domains[i];
+            }
+
+            if (acme_issue_certificate(ctx->acme, domains, ctx->config.acme_num_domains,
+                                       ctx->config.acme_email, &cert_pem, &key_pem) == 0) {
+                if (acme_save_certificate(cert_pem, key_pem,
+                                          ctx->config.acme_cert_path,
+                                          ctx->config.acme_key_path) == 0) {
+                    log_info("ACME 续期: 证书续期并保存成功");
+                } else {
+                    log_error("ACME 续期: 证书保存失败");
+                }
+                free(cert_pem);
+                free(key_pem);
+            } else {
+                log_error("ACME 续期: 证书签发失败");
+            }
+        } else {
+            log_debug("ACME 续期: 证书仍有效（剩余 %d 天），跳过", days_left);
+        }
+    }
 }
 
 /**
@@ -1506,6 +1618,11 @@ int server_start(server_context_t *ctx) {
         /* 多线程模式下 listen_fd 需要非阻塞（用于 accept + poll 等待） */
         set_nonblocking(ctx->listen_fd);
 
+        /* 启动 ACME 自动续期后台协程 */
+        if (ctx->config.acme_enabled) {
+            coco_go(acme_renewal_coroutine, ctx);
+        }
+
         /* 在主线程中运行 accept_loop */
         accept_loop(ctx);
 
@@ -1514,6 +1631,10 @@ int server_start(server_context_t *ctx) {
         coco_global_sched_stop();
     } else {
         /* 单线程模式：listen_fd 保持阻塞 */
+        /* 启动 ACME 自动续期后台协程 */
+        if (ctx->config.acme_enabled) {
+            coco_go(acme_renewal_coroutine, ctx);
+        }
         accept_loop(ctx);
     }
 

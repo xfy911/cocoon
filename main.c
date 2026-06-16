@@ -89,6 +89,7 @@ static void print_usage(const char *prog) {
     printf("  --auth-pass <pass>  Basic Auth 密码\n");
     printf("  --rate-limit <n>    每秒最大请求数（限流）\n");
     printf("  --plugin <path>  加载插件（可多次指定）\n");
+    printf("  --acme         启用 ACME 自动证书\n");
     printf("\nSignals:\n");
     printf("  SIGHUP   热重载配置文件（无需重启服务器）\n");
     printf("  SIGUSR1  热重载所有插件（无需重启服务器）\n");
@@ -207,6 +208,8 @@ static bool parse_args(int argc, char *argv[], cocoon_config_t *config) {
                 fprintf(stderr, "Error: 最多支持 %d 个插件\n", COCOON_MAX_PLUGINS);
                 return false;
             }
+        } else if (strcmp(argv[i], "--acme") == 0) {
+            config->acme_enabled = true;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             exit(0);

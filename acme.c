@@ -22,7 +22,9 @@
 #include <openssl/bio.h>
 #include <openssl/buffer.h>
 #include <openssl/x509v3.h>
+#include <openssl/x509.h>
 #include <curl/curl.h>
+#include "platform.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -946,7 +948,102 @@ int acme_get_keyauth(acme_ctx_t *ctx, const char *token, char **out) {
     return 0;
 }
 
-/* ===== 一键签发 ===== */
+/* ===== 证书保存与过期检查 ===== */
+
+int acme_save_certificate(const char *cert_pem, const char *key_pem,
+                          const char *cert_path, const char *key_path) {
+    if (!cert_pem || !key_pem || !cert_path || !key_path) return -1;
+
+    /* 确保证书目录存在 */
+    char cert_dir[512];
+    snprintf(cert_dir, sizeof(cert_dir), "%s", cert_path);
+    char *last_slash = strrchr(cert_dir, '/');
+    if (last_slash) {
+        *last_slash = '\0';
+        cocoon_mkdir(cert_dir);
+    }
+
+    /* 确保私钥目录存在 */
+    char key_dir[512];
+    snprintf(key_dir, sizeof(key_dir), "%s", key_path);
+    last_slash = strrchr(key_dir, '/');
+    if (last_slash) {
+        *last_slash = '\0';
+        cocoon_mkdir(key_dir);
+    }
+
+    FILE *fp = fopen(cert_path, "w");
+    if (!fp) {
+        log_error("无法打开证书文件写入: %s", cert_path);
+        return -1;
+    }
+    fwrite(cert_pem, 1, strlen(cert_pem), fp);
+    fclose(fp);
+
+    fp = fopen(key_path, "w");
+    if (!fp) {
+        log_error("无法打开私钥文件写入: %s", key_path);
+        return -1;
+    }
+    fwrite(key_pem, 1, strlen(key_pem), fp);
+    fclose(fp);
+
+    log_info("证书已保存: %s", cert_path);
+    log_info("私钥已保存: %s", key_path);
+    return 0;
+}
+
+int acme_cert_days_until_expiry(const char *cert_path) {
+    if (!cert_path || access(cert_path, R_OK) != 0) {
+        return -1;
+    }
+
+    FILE *fp = fopen(cert_path, "r");
+    if (!fp) return -1;
+
+    X509 *cert = PEM_read_X509(fp, NULL, NULL, NULL);
+    fclose(fp);
+    if (!cert) return -1;
+
+    ASN1_TIME *not_after = X509_get_notAfter(cert);
+    if (!not_after) {
+        X509_free(cert);
+        return -1;
+    }
+
+    /* 解析 ASN1_TIME */
+    struct tm tm = {0};
+    const char *str = (const char *)not_after->data;
+    int year = 0, mon = 0, day = 0, hour = 0, min = 0, sec = 0;
+    if (not_after->length >= 13) {
+        /* UTCTime: YYMMDDHHMMSSZ (13 chars) or GeneralizedTime: YYYYMMDDHHMMSSZ (15 chars) */
+        if (not_after->length >= 15 && str[0] == '2' && str[1] == '0') {
+            /* GeneralizedTime */
+            sscanf(str, "%4d%2d%2d%2d%2d%2dZ", &year, &mon, &day, &hour, &min, &sec);
+        } else {
+            /* UTCTime */
+            sscanf(str, "%2d%2d%2d%2d%2d%2dZ", &year, &mon, &day, &hour, &min, &sec);
+            year += (year >= 50) ? 1900 : 2000;
+        }
+        tm.tm_year = year - 1900;
+        tm.tm_mon = mon - 1;
+        tm.tm_mday = day;
+        tm.tm_hour = hour;
+        tm.tm_min = min;
+        tm.tm_sec = sec;
+    }
+
+    time_t expiry = timegm(&tm);
+    time_t now = time(NULL);
+    X509_free(cert);
+
+    if (expiry == (time_t)-1) return -1;
+
+    double diff = difftime(expiry, now);
+    return (int)(diff / 86400.0);
+}
+
+/* ===== 一键签发（完整流程） ===== */
 
 int acme_issue_certificate(acme_ctx_t *ctx, const char **domains, size_t num_domains,
                            const char *email, char **cert_pem, char **key_pem) {

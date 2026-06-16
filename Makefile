@@ -151,8 +151,12 @@ $(UNIT_TEST_DIR)/test_dashboard: $(UNIT_TEST_DIR)/test_dashboard.c dashboard.c s
 	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_dashboard.c dashboard.c sse.c log.c $(UNITY_SRC) $(LDFLAGS)
 
 # ACME 测试
-$(UNIT_TEST_DIR)/test_acme: $(UNIT_TEST_DIR)/test_acme.c acme.c log.c $(UNITY_SRC)
-	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_acme.c acme.c log.c $(UNITY_SRC) $(LDFLAGS)
+$(UNIT_TEST_DIR)/test_acme: $(UNIT_TEST_DIR)/test_acme.c acme.c log.c platform.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_acme.c acme.c log.c platform.c $(UNITY_SRC) $(LDFLAGS)
+
+# ACME 配置集成测试
+$(UNIT_TEST_DIR)/test_acme_config: $(UNIT_TEST_DIR)/test_acme_config.c config.c acme.c log.c access_log.c http.c platform.c $(UNITY_SRC)
+	$(CC) $(CFLAGS) -I. -I$(UNIT_TEST_DIR)/../unity -o $@ $(UNIT_TEST_DIR)/test_acme_config.c config.c acme.c log.c access_log.c http.c platform.c $(UNITY_SRC) $(LDFLAGS)
 
 # 安装
 install: $(TARGET)

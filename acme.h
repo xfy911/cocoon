@@ -230,6 +230,26 @@ int acme_get_keyauth(acme_ctx_t *ctx, const char *token, char **out);
 int acme_issue_certificate(acme_ctx_t *ctx, const char **domains, size_t num_domains,
                            const char *email, char **cert_pem, char **key_pem);
 
+/**
+ * acme_save_certificate - 将证书和私钥保存到文件
+ *
+ * @param cert_pem 证书 PEM 字符串
+ * @param key_pem 私钥 PEM 字符串
+ * @param cert_path 证书文件路径
+ * @param key_path 私钥文件路径
+ * @return 0 成功，-1 失败
+ */
+int acme_save_certificate(const char *cert_pem, const char *key_pem,
+                          const char *cert_path, const char *key_path);
+
+/**
+ * acme_cert_days_until_expiry - 检查证书剩余有效天数
+ *
+ * @param cert_path 证书文件路径
+ * @return 剩余天数，<0 表示证书不存在或已过期，0 表示今天过期
+ */
+int acme_cert_days_until_expiry(const char *cert_path);
+
 /* HTTP 请求辅助（内部使用，暴露给单元测试） */
 typedef struct {
     int status;

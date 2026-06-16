@@ -726,6 +726,78 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
             } else {
                 fprintf(stderr, "[Config] 第 %d 行: cache 期望对象\n", val.line);
             }
+        } else if (strcmp(key_str, "acme") == 0) {
+            if (val.type == TOKEN_LBRACE) {
+                while (1) {
+                    token_t akey = parser_next_token(&p);
+                    if (akey.type == TOKEN_RBRACE) break;
+                    if (akey.type != TOKEN_STRING) {
+                        parser_skip_value(&p);
+                        continue;
+                    }
+                    char *ak_str = parser_expect_string(&p, akey);
+                    token_t asep = parser_next_token(&p);
+                    if (asep.type != TOKEN_COLON) {
+                        free(ak_str);
+                        parser_skip_value(&p);
+                        continue;
+                    }
+                    token_t aval = parser_next_token(&p);
+                    if (strcmp(ak_str, "enabled") == 0 && aval.type == TOKEN_TRUE) {
+                        config->acme_enabled = true;
+                    } else if (strcmp(ak_str, "enabled") == 0 && aval.type == TOKEN_FALSE) {
+                        config->acme_enabled = false;
+                    } else if (strcmp(ak_str, "directory_url") == 0 && aval.type == TOKEN_STRING) {
+                        char *v = token_str_dup(&aval);
+                        if (v) {
+                            snprintf(config->acme_directory_url, sizeof(config->acme_directory_url), "%s", v);
+                            free(v);
+                        }
+                    } else if (strcmp(ak_str, "email") == 0 && aval.type == TOKEN_STRING) {
+                        char *v = token_str_dup(&aval);
+                        if (v) {
+                            snprintf(config->acme_email, sizeof(config->acme_email), "%s", v);
+                            free(v);
+                        }
+                    } else if (strcmp(ak_str, "domains") == 0 && aval.type == TOKEN_LBRACKET) {
+                        while (1) {
+                            token_t ditem = parser_next_token(&p);
+                            if (ditem.type == TOKEN_RBRACKET) break;
+                            if (ditem.type == TOKEN_STRING && config->acme_num_domains < 8) {
+                                char *v = token_str_dup(&ditem);
+                                if (v) {
+                                    snprintf(config->acme_domains[config->acme_num_domains], sizeof(config->acme_domains[0]), "%s", v);
+                                    config->acme_num_domains++;
+                                    free(v);
+                                }
+                            }
+                            token_t dsep = parser_next_token(&p);
+                            if (dsep.type == TOKEN_RBRACKET) break;
+                            if (dsep.type != TOKEN_COMMA) break;
+                        }
+                    } else if (strcmp(ak_str, "cert_path") == 0 && aval.type == TOKEN_STRING) {
+                        char *v = token_str_dup(&aval);
+                        if (v) {
+                            snprintf(config->acme_cert_path, sizeof(config->acme_cert_path), "%s", v);
+                            free(v);
+                        }
+                    } else if (strcmp(ak_str, "key_path") == 0 && aval.type == TOKEN_STRING) {
+                        char *v = token_str_dup(&aval);
+                        if (v) {
+                            snprintf(config->acme_key_path, sizeof(config->acme_key_path), "%s", v);
+                            free(v);
+                        }
+                    } else if (strcmp(ak_str, "renew_days") == 0 && aval.type == TOKEN_NUMBER) {
+                        config->acme_renew_days = (uint32_t)token_to_long(&aval);
+                    }
+                    free(ak_str);
+                    token_t asep2 = parser_next_token(&p);
+                    if (asep2.type == TOKEN_RBRACE) break;
+                    if (asep2.type != TOKEN_COMMA) break;
+                }
+            } else {
+                fprintf(stderr, "[Config] 第 %d 行: acme 期望对象\n", val.line);
+            }
         } /* 其他字段：忽略（未来扩展预留） */
 
         free(key_str);
@@ -911,6 +983,36 @@ bool config_validate(const cocoon_config_t *config, char *err_buf, size_t err_si
         }
     }
 
+    /* ACME 配置校验 */
+    if (config->acme_enabled) {
+        if (config->acme_email[0] == '\0') {
+            SET_ERR("ACME 邮箱不能为空");
+            return false;
+        }
+        if (config->acme_num_domains == 0) {
+            SET_ERR("ACME 域名列表不能为空");
+            return false;
+        }
+        for (size_t i = 0; i < config->acme_num_domains; i++) {
+            if (config->acme_domains[i][0] == '\0') {
+                SET_ERR("ACME 域名不能为空");
+                return false;
+            }
+        }
+        if (config->acme_cert_path[0] == '\0') {
+            SET_ERR("ACME 证书保存路径不能为空");
+            return false;
+        }
+        if (config->acme_key_path[0] == '\0') {
+            SET_ERR("ACME 私钥保存路径不能为空");
+            return false;
+        }
+        if (config->acme_renew_days == 0 || config->acme_renew_days > 90) {
+            SET_ERR("ACME renew_days 必须在 1-90 之间");
+            return false;
+        }
+    }
+
 #undef SET_ERR
     return true;
 }
@@ -949,7 +1051,8 @@ void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
                   bool has_rate_limit,
                   bool has_plugins,
                   bool has_cache_enabled, bool has_cache_max_size,
-                  bool has_cache_ttl_seconds, bool has_cache_max_entry_size) {
+                  bool has_cache_ttl_seconds, bool has_cache_max_entry_size,
+                  bool has_acme_enabled) {
     if (!base || !cmdline) return;
 
     /* 命令行显式指定的值覆盖配置文件 */
@@ -998,6 +1101,7 @@ void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
     if (has_cache_max_size) base->cache_max_size = cmdline->cache_max_size;
     if (has_cache_ttl_seconds) base->cache_ttl_seconds = cmdline->cache_ttl_seconds;
     if (has_cache_max_entry_size) base->cache_max_entry_size = cmdline->cache_max_entry_size;
+    if (has_acme_enabled) base->acme_enabled = cmdline->acme_enabled;
     /* threaded 是 flag 参数，命令行指定了就用命令行的 */
     if (cmdline->threaded) base->threaded = true;
 }

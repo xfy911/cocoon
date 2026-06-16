@@ -36,6 +36,7 @@
 #include "cache.h"
 #include "dashboard.h"
 #include "acme.h"
+#include "throttle.h"
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -71,6 +72,7 @@ typedef struct {
     socklen_t       addr_len;       /**< 地址长度 */
     int             response_status; /**< 最后响应的 HTTP 状态码 */
     server_context_t *ctx;            /**< 服务器上下文（用于访问代理配置） */
+    cocoon_throttle_t *throttle;      /**< 每连接限速器（NULL 表示不限制） */
 } connection_t;
 struct server_context {
     cocoon_socket_t     listen_fd;    /**< 监听 socket */
@@ -88,6 +90,8 @@ struct server_context {
     cocoon_cache_t     *cache;        /**< 内存响应缓存（NULL 表示未启用） */
     /* ACME 客户端 */
     acme_ctx_t         *acme;         /**< ACME 上下文（NULL 表示未启用） */
+    /* 全局限速器 */
+    cocoon_throttle_t  *global_throttle; /**< 全局总限速（NULL 表示未启用） */
 };
 /* 服务器启动时间 */
 time_t g_server_start_time = 0;
@@ -142,6 +146,12 @@ static void close_connection(connection_t *conn) {
         cocoon_socket_close(conn->fd);
         conn->fd = COCOON_INVALID_SOCKET;
         conn->closed = true;
+        /* 注销限速 */
+        if (conn->throttle) {
+            throttle_clear_fd(conn->fd);
+            free(conn->throttle);
+            conn->throttle = NULL;
+        }
         atomic_fetch_sub(&g_active_connections, 1);
     }
 }
@@ -1330,6 +1340,17 @@ static void accept_loop(void *arg) {
         conn->addr_len = addr_len;
         conn->response_status = 0;
         conn->ctx = ctx;
+        conn->throttle = NULL;
+
+        /* 初始化 per-connection 限速 */
+        if (ctx->config.throttle_conn_rate > 0) {
+            conn->throttle = (cocoon_throttle_t *)malloc(sizeof(cocoon_throttle_t));
+            if (conn->throttle) {
+                throttle_init(conn->throttle, ctx->config.throttle_conn_rate, 0);
+                throttle_set_fd(conn->fd, conn->throttle);
+                log_debug("fd=%d 已启用 per-connection 限速: %u bytes/sec", conn->fd, ctx->config.throttle_conn_rate);
+            }
+        }
 
         atomic_fetch_add(&g_active_connections, 1);
         log_debug("新连接 fd=%d，当前活跃连接: %d", client_fd,
@@ -1390,6 +1411,15 @@ server_context_t *server_create(const cocoon_config_t *config, const char *confi
     }
 
     g_max_connections = config->max_connections;
+
+    /* 初始化全局限速 */
+    if (config->throttle_global_rate > 0) {
+        ctx->global_throttle = (cocoon_throttle_t *)malloc(sizeof(cocoon_throttle_t));
+        if (ctx->global_throttle) {
+            throttle_init(ctx->global_throttle, config->throttle_global_rate, 0);
+            log_info("全局限速已启用: %u bytes/sec", config->throttle_global_rate);
+        }
+    }
 
     /* 创建监听 socket */
     ctx->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -1859,6 +1889,12 @@ void server_destroy(server_context_t *ctx) {
     if (ctx->config.root_dir) {
         free((void *)ctx->config.root_dir);
         ctx->config.root_dir = NULL;
+    }
+
+    /* 销毁全局限速器 */
+    if (ctx->global_throttle) {
+        free(ctx->global_throttle);
+        ctx->global_throttle = NULL;
     }
 
     free(ctx);

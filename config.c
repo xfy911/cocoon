@@ -798,6 +798,36 @@ bool config_load_from_file(const char *path, cocoon_config_t *config) {
             } else {
                 fprintf(stderr, "[Config] 第 %d 行: acme 期望对象\n", val.line);
             }
+        } else if (strcmp(key_str, "throttle") == 0) {
+            if (val.type == TOKEN_LBRACE) {
+                while (1) {
+                    token_t tkey = parser_next_token(&p);
+                    if (tkey.type == TOKEN_RBRACE) break;
+                    if (tkey.type != TOKEN_STRING) {
+                        parser_skip_value(&p);
+                        continue;
+                    }
+                    char *tk_str = parser_expect_string(&p, tkey);
+                    token_t tsep = parser_next_token(&p);
+                    if (tsep.type != TOKEN_COLON) {
+                        free(tk_str);
+                        parser_skip_value(&p);
+                        continue;
+                    }
+                    token_t tval = parser_next_token(&p);
+                    if (strcmp(tk_str, "conn_rate") == 0 && tval.type == TOKEN_NUMBER) {
+                        config->throttle_conn_rate = (uint32_t)token_to_long(&tval);
+                    } else if (strcmp(tk_str, "global_rate") == 0 && tval.type == TOKEN_NUMBER) {
+                        config->throttle_global_rate = (uint32_t)token_to_long(&tval);
+                    }
+                    free(tk_str);
+                    token_t tsep2 = parser_next_token(&p);
+                    if (tsep2.type == TOKEN_RBRACE) break;
+                    if (tsep2.type != TOKEN_COMMA) break;
+                }
+            } else {
+                fprintf(stderr, "[Config] 第 %d 行: throttle 期望对象\n", val.line);
+            }
         } /* 其他字段：忽略（未来扩展预留） */
 
         free(key_str);
@@ -955,6 +985,16 @@ bool config_validate(const cocoon_config_t *config, char *err_buf, size_t err_si
         return false;
     }
 
+    /* 限速配置校验 */
+    if (config->throttle_conn_rate > 100000000) {
+        SET_ERR("throttle_conn_rate 不能超过 100MB/s");
+        return false;
+    }
+    if (config->throttle_global_rate > 1000000000) {
+        SET_ERR("throttle_global_rate 不能超过 1GB/s");
+        return false;
+    }
+
     /* 插件路径 */
     for (size_t i = 0; i < config->num_plugins; i++) {
         if (config->plugins[i] == NULL || config->plugins[i][0] == '\0') {
@@ -1039,6 +1079,8 @@ bool config_validate(const cocoon_config_t *config, char *err_buf, size_t err_si
  * @param has_auth_user 是否显式指定 auth_user
  * @param has_auth_pass 是否显式指定 auth_pass
  * @param has_rate_limit 是否显式指定 rate_limit
+ * @param has_throttle_conn_rate 是否显式指定 throttle_conn_rate
+ * @param has_throttle_global_rate 是否显式指定 throttle_global_rate
  * @param has_plugins   是否显式指定 plugins
  */
 void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
@@ -1049,6 +1091,7 @@ void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
                   bool has_access_log,
                   bool has_cors_enabled, bool has_auth_user, bool has_auth_pass,
                   bool has_rate_limit,
+                  bool has_throttle_conn_rate, bool has_throttle_global_rate,
                   bool has_plugins,
                   bool has_cache_enabled, bool has_cache_max_size,
                   bool has_cache_ttl_seconds, bool has_cache_max_entry_size,
@@ -1090,6 +1133,8 @@ void config_merge(cocoon_config_t *base, const cocoon_config_t *cmdline,
         base->auth_pass = strdup(cmdline->auth_pass);
     }
     if (has_rate_limit) base->rate_limit = cmdline->rate_limit;
+    if (has_throttle_conn_rate) base->throttle_conn_rate = cmdline->throttle_conn_rate;
+    if (has_throttle_global_rate) base->throttle_global_rate = cmdline->throttle_global_rate;
     if (has_plugins) {
         for (size_t i = 0; i < cmdline->num_plugins && i < COCOON_MAX_PLUGINS; i++) {
             if (base->num_plugins < COCOON_MAX_PLUGINS) {

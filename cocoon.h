@@ -111,6 +111,9 @@ typedef struct cocoon_config {
     char        acme_cert_path[512]; /**< 证书保存路径 */
     char        acme_key_path[512];  /**< 私钥保存路径 */
     uint32_t    acme_renew_days;     /**< 到期前 N 天自动续期（默认 30） */
+    /* 带宽限速配置 */
+    uint32_t    throttle_conn_rate;   /**< 每连接限速（bytes/sec，0 表示不限制） */
+    uint32_t    throttle_global_rate;  /**< 全局总限速（bytes/sec，0 表示不限制） */
 } cocoon_config_t;
 
 /* === 服务器生命周期 API === */

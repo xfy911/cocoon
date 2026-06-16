@@ -11,6 +11,7 @@
  */
 
 #include "platform.h"
+#include "throttle.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -131,16 +132,23 @@ time_t cocoon_stat_mtime(const cocoon_stat_t *st) {
 /**
  * Linux 下优先使用 sendfile 零拷贝。
  * 失败时回退到 read+write 循环，64KB 缓冲区。
+ * 如果限速启用，使用 read+write 循环以便控制发送速率。
  */
 ssize_t cocoon_file_send(cocoon_socket_t sock, cocoon_file_t file,
                          int64_t offset, size_t count) {
-    off_t off = (off_t)offset;
-    ssize_t sent = sendfile(sock, file, &off, count);
-    if (sent >= 0 || (errno != EINVAL && errno != ENOSYS)) {
-        return sent;
+    /* 检查限速 */
+    cocoon_throttle_t *t = throttle_lookup(sock);
+
+    if (!t) {
+        /* 无限速，优先使用 sendfile 零拷贝 */
+        off_t off = (off_t)offset;
+        ssize_t sent = sendfile(sock, file, &off, count);
+        if (sent >= 0 || (errno != EINVAL && errno != ENOSYS)) {
+            return sent;
+        }
     }
 
-    /* sendfile 不支持此场景，回退到 read+write */
+    /* 限速启用或 sendfile 不支持，回退到 read+write */
     if (lseek(file, (off_t)offset, SEEK_SET) < 0) {
         return -1;
     }
@@ -158,6 +166,19 @@ ssize_t cocoon_file_send(cocoon_socket_t sock, cocoon_file_t file,
 
         size_t buf_sent = 0;
         while (buf_sent < (size_t)n) {
+            /* 应用限速 */
+            if (t) {
+                size_t chunk = (size_t)n - buf_sent;
+                uint64_t wait_usec = throttle_consume(t, chunk);
+                if (wait_usec > 0) {
+                    struct timespec ts = {
+                        .tv_sec = (time_t)(wait_usec / 1000000),
+                        .tv_nsec = (long)((wait_usec % 1000000) * 1000)
+                    };
+                    nanosleep(&ts, NULL);
+                    continue;
+                }
+            }
             ssize_t w = write(sock, buf + buf_sent, (size_t)n - buf_sent);
             if (w < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
@@ -414,6 +435,8 @@ ssize_t cocoon_file_send(cocoon_socket_t sock, cocoon_file_t file,
         return -1;
     }
 
+    cocoon_throttle_t *t = throttle_lookup(sock);
+
     char buf[65536]; /* 64KB：现代页表和磁盘 I/O 的最佳平衡点 */
     size_t total = 0;
 
@@ -430,6 +453,19 @@ ssize_t cocoon_file_send(cocoon_socket_t sock, cocoon_file_t file,
 
         size_t buf_sent = 0;
         while (buf_sent < (size_t)n) {
+            /* 应用限速 */
+            if (t) {
+                size_t to_send = (size_t)n - buf_sent;
+                uint64_t wait_usec = throttle_consume(t, to_send);
+                if (wait_usec > 0) {
+                    struct timespec ts = {
+                        .tv_sec = (time_t)(wait_usec / 1000000),
+                        .tv_nsec = (long)((wait_usec % 1000000) * 1000)
+                    };
+                    nanosleep(&ts, NULL);
+                    continue;
+                }
+            }
             int to_send = (int)((size_t)n - buf_sent);
             int w = send(sock, buf + buf_sent, to_send, 0);
             if (w == SOCKET_ERROR) {

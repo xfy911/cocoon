@@ -9,6 +9,7 @@
 #include "proxy.h"
 #include "proxy_tls.h"
 #include "log.h"
+#include "throttle.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -499,6 +500,20 @@ static void proxy_build_xff(const struct sockaddr_storage *client_addr,
 static int send_all_fd(cocoon_socket_t fd, const char *data, size_t len) {
     size_t sent = 0;
     while (sent < len) {
+        /* 应用限速 */
+        cocoon_throttle_t *t = throttle_lookup(fd);
+        if (t) {
+            size_t chunk = len - sent;
+            uint64_t wait_usec = throttle_consume(t, chunk);
+            if (wait_usec > 0) {
+                struct timespec ts = {
+                    .tv_sec = (time_t)(wait_usec / 1000000),
+                    .tv_nsec = (long)((wait_usec % 1000000) * 1000)
+                };
+                nanosleep(&ts, NULL);
+                continue;
+            }
+        }
         ssize_t n = send(fd, data + sent, len - sent, 0);
         if (n < 0) {
             if (errno == EAGAIN || errno == EINTR) continue;

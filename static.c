@@ -12,6 +12,7 @@
 #include "cocoon.h"
 #include "platform.h"
 #include "cache.h"
+#include "throttle.h"
 #include "../coco/include/coco.h"
 #include "tls.h"
 #include <stdio.h>
@@ -247,6 +248,45 @@ static bool safe_path_join(char *dst, size_t dst_size,
 int send_all(int fd, const char *buf, size_t len) {
     if (tls_has_connection(fd)) {
         return tls_write(fd, buf, len) == (ssize_t)len ? 0 : -1;
+    }
+
+    /* 检查限速 */
+    cocoon_throttle_t *t = throttle_lookup(fd);
+    if (t) {
+        size_t sent = 0;
+        while (sent < len) {
+            size_t chunk = len - sent;
+            uint64_t wait_usec = throttle_consume(t, chunk);
+            if (wait_usec > 0) {
+                struct timespec ts = {
+                    .tv_sec = (time_t)(wait_usec / 1000000),
+                    .tv_nsec = (long)((wait_usec % 1000000) * 1000)
+                };
+                nanosleep(&ts, NULL);
+                continue;
+            }
+            ssize_t n;
+            if (coco_sched_get_current() != NULL) {
+                int ret = coco_write(fd, buf + sent, chunk);
+                if (ret < 0) {
+                    if (ret == COCO_ERROR_WOULD_BLOCK) {
+                        continue;
+                    }
+                    return -1;
+                }
+                n = ret;
+            } else {
+                n = cocoon_socket_send(fd, buf + sent, chunk);
+            }
+            if (n < 0) {
+                int err = cocoon_get_last_error();
+                if (err == EAGAIN || err == EINTR) continue;
+                return -1;
+            }
+            if (n == 0) return -1;
+            sent += (size_t)n;
+        }
+        return 0;
     }
 
     size_t sent = 0;
